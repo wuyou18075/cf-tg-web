@@ -73,13 +73,25 @@ journalctl -u traffic-telegram-report.service
 
 若用 Cloudflare Workers Builds 连接本仓库：Deploy command 用默认 `npx wrangler deploy` 即可；同样**不要**在 `wrangler.toml` 里写无效 `database_id`。
 
-### 第 3 步：绑定 D1
+### 第 3 步：绑定 D1（必做，且要写进 wrangler.toml）
 
-Worker 详情 → **设置** → **绑定** → 添加 **D1 数据库**：
+Dashboard 绑定 **不够**：若用 Git / Workers Builds 部署，`wrangler.toml` 里没有 `database_id` 时，**每次部署可能冲掉 `env.DB`**，页面会报「D1 未绑定」。
 
-- 变量名：`DB`（必须是 `DB`）
-- 数据库：选刚创建的 `traffic-db`
-- 保存
+**推荐（持久）：**
+
+1. 打开 D1 库（如 `tg-cf-web`）→ 复制 **数据库 ID**（UUID）
+2. 编辑仓库 `wrangler.toml`：
+
+```toml
+[[d1_databases]]
+binding = "DB"
+database_name = "tg-cf-web"
+database_id = "你的-UUID"
+```
+
+3. `git push` 再部署
+
+**临时：** Dashboard → Worker → 设置 → 绑定 → D1，变量名 `DB`，然后对该 Worker **再点一次部署**（只绑不定部署会仍无 `env.DB`）。
 
 ### 第 4 步：加密变量
 

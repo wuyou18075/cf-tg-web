@@ -19,6 +19,18 @@
 const SESSION_TTL = 60 * 60 * 24 * 7;
 const COOKIE_NAME = "dash_session";
 
+/** 运行时无 DB 时的说明（列出 env 键名，不含密钥值） */
+function missingDbError(env) {
+  const keys = env && typeof env === "object" ? Object.keys(env).sort() : [];
+  return (
+    "D1 未绑定：运行时 env.DB 不存在。" +
+    "请在 wrangler.toml 写入真实 database_id 后重新部署，" +
+    "或 Dashboard 绑定 DB 后点「部署」最新版本。" +
+    (keys.length ? " 当前 env 键：" + keys.join(", ") : " 当前 env 为空")
+  );
+}
+
+
 const json = (data, status = 200, extra = {}) =>
   new Response(JSON.stringify(data), {
     status,
@@ -216,7 +228,7 @@ async function getConfig(env) {
 }
 
 async function saveConfig(env, data) {
-  if (!env.DB) throw new Error("D1 未绑定，无法保存设置");
+  if (!env.DB) throw new Error(missingDbError(env));
   const now = Math.floor(Date.now() / 1000);
   const normalized = {
     t_token: data.t_token !== undefined ? String(data.t_token).trim() : undefined,
@@ -237,7 +249,7 @@ async function saveConfig(env, data) {
 // ─── VPS Token 管理 ───
 
 async function getOrCreateVpsToken(env, mid) {
-  if (!env.DB) throw new Error("D1 未绑定：请在 Worker 设置 → 绑定 中添加 D1（变量名必须是 DB）");
+  if (!env.DB) throw new Error(missingDbError(env));
   const existing = await env.DB.prepare(
     `SELECT token FROM vps_tokens WHERE machine_id = ?`
   ).bind(mid).first();
@@ -280,7 +292,7 @@ async function generateCommand(env, request, rawMid) {
   }
 
   if (!env.DB) {
-    return { ok: false, error: "D1 未绑定：请在 Cloudflare Dashboard → Worker 设置 → 绑定 → 添加 D1（变量名 DB）后重新部署" };
+    return { ok: false, error: missingDbError(env) };
   }
 
   let vpsToken;
@@ -840,7 +852,7 @@ export default {
 
     // POST /api/report — agent 上报
     if (req.method === "POST" && url.pathname === "/api/report") {
-      if (!env.DB) return json({ ok: false, error: "DB not bound" }, 500);
+      if (!env.DB) return json({ ok: false, error: missingDbError(env) }, 500);
       let body;
       try { body = await req.json(); } catch { return json({ ok: false, error: "invalid json" }, 400); }
       const mid = String(body.machine_id || req.headers.get("x-machine-id") || "").trim();
@@ -915,7 +927,7 @@ export default {
       const mid = String(url.searchParams.get("mid") || "").trim();
       try {
         if (!env.DB) {
-          return json({ ok: false, error: "D1 未绑定：变量名必须是 DB" }, 500);
+          return json({ ok: false, error: missingDbError(env) }, 500);
         }
         if (schemaErr) {
           try { await ensureSchema(env); schemaErr = ""; }
