@@ -24,6 +24,8 @@ check_debian13() {
 
 validate_token() { [[ "$1" =~ ^[0-9]{5,20}:[A-Za-z0-9_-]{20,100}$ ]]; }
 validate_chat_id() { [[ "$1" =~ ^-?[0-9]{5,20}$ ]]; }
+# 格式 HH:MM:SS，例如 20:00:00 / 23:00:00
+validate_time() { [[ "$1" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$ ]]; }
 
 resolve_token() {
   local val="${ttoken:-}"
@@ -40,6 +42,13 @@ resolve_chat_id() {
     read -r -p '请输入 Telegram Chat ID: ' val
   fi
   validate_chat_id "${val}" || die 'Chat ID 应为纯数字，可带负号。'
+  printf '%s' "${val}"
+}
+
+# 环境变量 ttime；未指定默认 20:00:00
+resolve_time() {
+  local val="${ttime:-20:00:00}"
+  validate_time "${val}" || die "汇报时间格式无效，应为 HH:MM:SS，例如 23:00:00。"
   printf '%s' "${val}"
 }
 
@@ -250,12 +259,13 @@ SERVICE_EOF
 }
 
 write_timer_unit() {
-  cat >"${TIMER_FILE}" <<'TIMER_EOF'
+  local report_time="$1"
+  cat >"${TIMER_FILE}" <<TIMER_EOF
 [Unit]
-Description=Run Telegram traffic report daily at 20:00
+Description=Run Telegram traffic report daily at ${report_time}
 
 [Timer]
-OnCalendar=*-*-* 20:00:00
+OnCalendar=*-*-* ${report_time}
 Persistent=true
 AccuracySec=1min
 Unit=traffic-telegram-report.service
@@ -273,10 +283,10 @@ send_test() {
 }
 
 print_summary() {
-  local ifname="$1"
+  local ifname="$1" report_time="$2"
   printf '\n安装完成。\n'
   printf '  监控网卡：  %s\n'   "${ifname}"
-  printf '  汇报时间：  每天 20:00（服务器本地时区）\n'
+  printf '  汇报时间：  每天 %s（服务器本地时区）\n' "${report_time}"
   printf '  配置文件：  %s（仅 root 可读）\n'  "${CONFIG_FILE}"
   printf '  查看定时器：systemctl status %s.timer\n'   "${APP_NAME}"
   printf '  立即发送：  systemctl start %s.service\n'  "${APP_NAME}"
@@ -297,20 +307,20 @@ uninstall_app() {
 }
 
 main() {
-  local ifname token chat_id
+  local ifname token chat_id report_time
   require_root
   if [[ "${1:-}" == '--uninstall' ]]; then uninstall_app; return; fi
   check_debian13
-  token="$(resolve_token)"; chat_id="$(resolve_chat_id)"
+  token="$(resolve_token)"; chat_id="$(resolve_chat_id)"; report_time="$(resolve_time)"
   install_deps
   ifname="$(detect_interface)"
   configure_vnstat "${ifname}"
   write_config "${ifname}" "${token}" "${chat_id}"
   write_reporter
   write_service_unit
-  write_timer_unit
+  write_timer_unit "${report_time}"
   send_test
-  print_summary "${ifname}"
+  print_summary "${ifname}" "${report_time}"
 }
 
 main "$@"
