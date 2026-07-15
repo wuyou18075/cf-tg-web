@@ -1,4 +1,4 @@
-name = "traffic-dashboard"
+name = "cf-tg-web"
 main = "cf-worker-example.js"
 compatibility_date = "2024-11-01"
 
