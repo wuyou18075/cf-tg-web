@@ -11,7 +11,7 @@
  *   2. 部署本 Worker（wrangler / 一键部署 / 粘贴代码）
  *   3. 绑定 D1：变量名必须是 DB
  *   4. 加密变量：PASSWORD（看板密码，必填）
- *                 TG_ID（TG 汇总 Chat ID，可选）
+ *                 TG_ID / TG_BOT_TOKEN（TG 汇总，可选；页面未填时使用）
  *                 TG_TOKEN（旧版全局上报密码，可选；新版用 VPS 独立 token）
  *   5. 再部署一次使绑定生效
  */
@@ -189,22 +189,47 @@ async function getHistory(env, mid, hours) {
 }
 
 async function getConfig(env) {
-  if (!env.DB) return {};
-  const { results } = await env.DB.prepare(`SELECT key, value FROM config`).all();
-  const cfg = {};
-  for (const r of results || []) cfg[r.key] = r.value;
-  return cfg;
+  const raw = {};
+  if (env.DB) {
+    try {
+      const { results } = await env.DB.prepare(`SELECT key, value FROM config`).all();
+      for (const r of results || []) raw[r.key] = r.value;
+    } catch {}
+  }
+  // 页面有值用页面；空则环境变量；时间类始终有默认
+  const pageToken = raw.t_token != null ? String(raw.t_token).trim() : "";
+  const pageId = raw.t_id != null ? String(raw.t_id).trim() : "";
+  const envToken = env.TG_BOT_TOKEN || env.BOT_TOKEN || env.TELEGRAM_BOT_TOKEN || "";
+  const envId = env.TG_ID || "";
+  const t_token = pageToken || envToken || "";
+  const t_id = pageId || envId || "";
+  const t_time = (raw.t_time != null && String(raw.t_time).trim()) || "20:00:00";
+  const cf_time = (raw.cf_time != null && String(raw.cf_time).trim()) || "0 * * * *";
+  return {
+    t_token,
+    t_id,
+    t_time,
+    cf_time,
+    t_token_from_env: !pageToken && !!envToken,
+    t_id_from_env: !pageId && !!envId,
+  };
 }
 
 async function saveConfig(env, data) {
-  if (!env.DB) return;
+  if (!env.DB) throw new Error("D1 未绑定，无法保存设置");
   const now = Math.floor(Date.now() / 1000);
+  const normalized = {
+    t_token: data.t_token !== undefined ? String(data.t_token).trim() : undefined,
+    t_id: data.t_id !== undefined ? String(data.t_id).trim() : undefined,
+    t_time: data.t_time !== undefined ? (String(data.t_time).trim() || "20:00:00") : undefined,
+    cf_time: data.cf_time !== undefined ? (String(data.cf_time).trim() || "0 * * * *") : undefined,
+  };
   const keys = ["t_token", "t_id", "t_time", "cf_time"];
-  const stmts = keys.filter(k => data[k] !== undefined).map(k =>
+  const stmts = keys.filter(k => normalized[k] !== undefined).map(k =>
     env.DB.prepare(
       `INSERT INTO config (key, value, updated_at) VALUES (?, ?, ?)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
-    ).bind(k, String(data[k]), now)
+    ).bind(k, normalized[k], now)
   );
   if (stmts.length) await env.DB.batch(stmts);
 }
@@ -212,6 +237,7 @@ async function saveConfig(env, data) {
 // ─── VPS Token 管理 ───
 
 async function getOrCreateVpsToken(env, mid) {
+  if (!env.DB) throw new Error("D1 未绑定：请在 Worker 设置 → 绑定 中添加 D1（变量名必须是 DB）");
   const existing = await env.DB.prepare(
     `SELECT token FROM vps_tokens WHERE machine_id = ?`
   ).bind(mid).first();
@@ -253,11 +279,21 @@ async function generateCommand(env, request, rawMid) {
     };
   }
 
-  const cfg = await getConfig(env);
+  if (!env.DB) {
+    return { ok: false, error: "D1 未绑定：请在 Cloudflare Dashboard → Worker 设置 → 绑定 → 添加 D1（变量名 DB）后重新部署" };
+  }
+
+  let vpsToken;
+  let cf_time = "0 * * * *";
+  try {
+    const cfg = await getConfig(env);
+    cf_time = cfg.cf_time || "0 * * * *";
+    vpsToken = await getOrCreateVpsToken(env, mid);
+  } catch (e) {
+    return { ok: false, error: "生成失败：" + (e && e.message ? e.message : String(e)) };
+  }
   const url = new URL(request.url);
   const cf_url = url.origin + "/api/report";
-  const vpsToken = await getOrCreateVpsToken(env, mid);
-  const cf_time = cfg.cf_time || "0 * * * *";
 
   // 命令不含 t_token/t_id — VPS 只上报 CF，TG 从看板汇总
   const midQ = bashSingleQuote(mid);
@@ -279,11 +315,14 @@ cf_time='${cf_time}' \\
 
 async function tgSummary(env) {
   const cfg = await getConfig(env);
+  // 页面空 → 环境变量（getConfig 已合并）；时间类已有默认
   const t_token = cfg.t_token || "";
-  // TG_ID 环境变量优先，其次看板设置页的 t_id
-  const t_id = env.TG_ID || cfg.t_id || "";
+  const t_id = cfg.t_id || "";
   if (!t_token || !t_id) {
-    return { ok: false, error: "请在看板设置 Telegram Bot Token，并配置 TG_ID（环境变量或看板 t_id）" };
+    return {
+      ok: false,
+      error: "请配置 Bot Token 与 Chat ID（看板设置，或环境变量 TG_BOT_TOKEN / TG_ID）",
+    };
   }
 
   const machines = await listMachines(env);
@@ -492,26 +531,30 @@ tr.active{background:#1a2740}
   <!-- 设置页 -->
   <div id="pageSettings" class="page">
     <div class="panel settings-form">
-      <h2>全局配置</h2>
-      <p class="muted" style="font-size:12px">保存后可在看板页「添加 VPS」一键生成安装命令。<br>TG 配置用于看板顶部的「📊 TG 汇总」按钮发送聚合日报。TG_ID 环境变量优先。</p>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+        <h2 style="margin:0">全局配置</h2>
+        <button type="button" onclick="switchTab('dash')">← 返回看板</button>
+      </div>
+      <p class="muted" style="font-size:12px;margin-top:10px">空字段自动用默认值；TG 凭证页面留空则读 Worker 环境变量（TG_BOT_TOKEN / TG_ID）。<br>保存后可在看板「添加 VPS」生成命令；「📊 TG 汇总」发聚合日报。</p>
       <label for="s_t_token">Telegram Bot Token（汇总用）</label>
-      <input id="s_t_token" type="password" placeholder="123456:ABCdef...">
-      <div class="hint">Worker 汇总 TG 消息所需的 Bot Token</div>
+      <input id="s_t_token" type="password" placeholder="留空则用环境变量 TG_BOT_TOKEN">
+      <div class="hint" id="hint_t_token">页面未填时使用环境变量 TG_BOT_TOKEN</div>
 
       <label for="s_t_id">Telegram Chat ID</label>
-      <input id="s_t_id" type="text" placeholder="-1001234567890">
-      <div class="hint">接收汇总日报的 TG 会话 ID</div>
+      <input id="s_t_id" type="text" placeholder="留空则用环境变量 TG_ID">
+      <div class="hint" id="hint_t_id">页面未填时使用环境变量 TG_ID</div>
 
       <label for="s_t_time">TG 汇报时间</label>
       <input id="s_t_time" type="text" placeholder="20:00:00">
-      <div class="hint">HH:MM:SS 格式，默认 20:00:00（暂未定时，需手动点 TG 汇总）</div>
+      <div class="hint">留空默认 20:00:00</div>
 
       <label for="s_cf_time">CF 上报 cron（VPS 端默认）</label>
       <input id="s_cf_time" type="text" placeholder="0 * * * *">
-      <div class="hint">5 段 cron，默认 0 * * * *（每小时），新 VPS 命令会使用此值</div>
+      <div class="hint">留空默认 0 * * * *（每小时）</div>
 
       <div class="save-row">
         <button class="primary" onclick="saveConfig()">保存设置</button>
+        <button type="button" onclick="switchTab('dash')">关闭</button>
         <span id="saveStatus" class="muted"></span>
       </div>
     </div>
@@ -564,8 +607,13 @@ function switchTab(name) {
 async function api(path, opts) {
   const r = await fetch(path, { credentials: "same-origin", ...opts });
   if (r.status === 401) { location.href = "/login"; return null; }
-  if (!r.ok) throw new Error(((await r.json().catch(()=>({}))).error) || r.statusText);
-  return r.json();
+  let body = null;
+  try { body = await r.json(); } catch {}
+  if (!r.ok) {
+    const msg = (body && body.error) || r.statusText || ("HTTP " + r.status);
+    throw new Error(msg);
+  }
+  return body;
 }
 
 function toast(msg) {
@@ -674,10 +722,19 @@ async function sendTgSummary() {
 async function loadConfig() {
   const data = await api("/api/config");
   if (!data) return;
-  document.getElementById("s_t_token").value = data.t_token || "";
-  document.getElementById("s_t_id").value = data.t_id || "";
+  // 环境变量来源：输入框留空，避免保存时把 env 值写进 D1
+  document.getElementById("s_t_token").value = data.t_token_from_env ? "" : (data.t_token || "");
+  document.getElementById("s_t_id").value = data.t_id_from_env ? "" : (data.t_id || "");
   document.getElementById("s_t_time").value = data.t_time || "20:00:00";
   document.getElementById("s_cf_time").value = data.cf_time || "0 * * * *";
+  const ht = document.getElementById("hint_t_token");
+  const hi = document.getElementById("hint_t_id");
+  if (ht) ht.textContent = data.t_token_from_env
+    ? "✓ 已使用环境变量 TG_BOT_TOKEN（页面留空即可）"
+    : "页面未填时使用环境变量 TG_BOT_TOKEN";
+  if (hi) hi.textContent = data.t_id_from_env
+    ? "✓ 已使用环境变量 TG_ID（页面留空即可）"
+    : "页面未填时使用环境变量 TG_ID";
 }
 
 async function saveConfig() {
@@ -727,7 +784,7 @@ async function genCmd() {
     return;
   }
   const btn = document.querySelector("#vpsBtnRegion .green");
-  btn.disabled = true; btn.textContent = "生成中…";
+  if (btn) { btn.disabled = true; btn.textContent = "生成中…"; }
   try {
     const data = await api("/api/generate?mid=" + encodeURIComponent(mid));
     if (!data || !data.ok) { toast(data?.error || "生成失败"); return; }
@@ -737,9 +794,9 @@ async function genCmd() {
     document.getElementById("vpsCmdRegion").style.display = "block";
     document.getElementById("vpsBtnRegion").style.display = "none";
   } catch(e) {
-    toast("生成失败：" + e.message);
+    toast("生成失败：" + (e && e.message ? e.message : String(e || "未知错误")));
   } finally {
-    btn.disabled = false; btn.textContent = "生成命令";
+    if (btn) { btn.disabled = false; btn.textContent = "生成命令"; }
   }
 }
 
@@ -774,8 +831,12 @@ export default {
   async fetch(req, env) {
     const url = new URL(req.url);
 
-    // 自动初始化
-    if (env.DB) { try { await ensureSchema(env); } catch {} }
+    // 自动初始化（失败时带上原因，避免生成命令时无表）
+    let schemaErr = "";
+    if (env.DB) {
+      try { await ensureSchema(env); }
+      catch (e) { schemaErr = e && e.message ? e.message : String(e); }
+    }
 
     // POST /api/report — agent 上报
     if (req.method === "POST" && url.pathname === "/api/report") {
@@ -852,9 +913,22 @@ export default {
     // GET /api/generate — 生成一键命令（含独立密码）
     if (req.method === "GET" && url.pathname === "/api/generate") {
       const mid = String(url.searchParams.get("mid") || "").trim();
-      const result = await generateCommand(env, req, mid);
-      if (!result.ok) return json(result, 400);
-      return json(result);
+      try {
+        if (!env.DB) {
+          return json({ ok: false, error: "D1 未绑定：变量名必须是 DB" }, 500);
+        }
+        if (schemaErr) {
+          try { await ensureSchema(env); schemaErr = ""; }
+          catch (e) {
+            return json({ ok: false, error: "D1 初始化失败：" + (e && e.message ? e.message : String(e)) }, 500);
+          }
+        }
+        const result = await generateCommand(env, req, mid);
+        if (!result.ok) return json(result, 400);
+        return json(result);
+      } catch (e) {
+        return json({ ok: false, error: "生成异常：" + (e && e.message ? e.message : String(e)) }, 500);
+      }
     }
 
     // POST /api/tg-summary — 发送 TG 汇总
