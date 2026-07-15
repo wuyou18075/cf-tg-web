@@ -12,9 +12,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy Worker
-        run: npx wrangler@3.109.0 deploy
+      - name: Replace D1 database_id
+        run: |
+          sed -i "s/{CLOUDFLARE_D1_ID}/${CLOUDFLARE_D1_ID}/g" wrangler.toml
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_D1_ID: ${{ secrets.CLOUDFLARE_D1_ID }}
+
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
+          wranglerVersion: "3.109.0"
