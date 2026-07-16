@@ -1205,15 +1205,17 @@ async function forceReportPushAll(env) {
 // ─── TG 汇总模板 ───
 
 const BUILTIN_TEMPLATES = [
-  {
-    id: "simple", name: "简洁日报", builtin: true,
-    body: "📊 流量汇总\n时间：{time}\n主机：{host_count} 台（在线 {online_count}）\n今日：入 {today_rx} / 出 {today_tx} / 合 {today_total}\n本月：入 {month_rx} / 出 {month_tx} / 合 {month_total}\n━━━━━━━━━━━━\n{machine_lines}",
-    machine_line: "{status} {m_id}  入{today_rx}/出{today_tx}  月{month_rx}/{month_tx}",
+  { id:"card", name:"📊 卡片日报", builtin:true,
+    body: "📊 流量日报\n━━━━━━━━━━━━━\n🕐 {time}\n🖥 主机：{host_count} 台（🟢 {online_count} 在线）\n\n📥 今日  入 {today_rx} ｜ 出 {today_tx}\n🟰 合计 {today_total}\n📅 本月  入 {month_rx} ｜ 出 {month_tx}\n🟰 合计 {month_total}\n━━━━━━━━━━━━━\n{machine_lines}",
+    machine_line: "{status} {m_id}  📥{today_rx} 📤{today_tx}",
   },
-  {
-    id: "detailed", name: "详细日报", builtin: true,
-    body: "📊 流量详细日报\\n━━━━━━━━━━━━\\n时间：{time}\\n主机数：{host_count}（在线 {online_count}）\\n\\n【今日】入 {today_rx} / 出 {today_tx} / 合计 {today_total}\\n【本月】入 {month_rx} / 出 {month_tx} / 合计 {month_total}\\n━━━━━━━━━━━━\\n各机明细：\\n{machine_lines}",
-    machine_line: "{status} {m_id}({hostname}) 今日 入{today_rx} 出{today_tx} | 本月 入{month_rx} 出{month_tx}",
+  { id:"detail", name:"📈 详细日报", builtin:true,
+    body: "📈 流量详细日报\n═══════════════\n🕐 时间：{time}\n🏠 主机数：{host_count}（🟢 {online_count} 在线）\n\n━━ 今日 ━━\n📥 入站 {today_rx} | 📤 出站 {today_tx} | 🟰 {today_total}\n━━ 本月 ━━\n📥 入站 {month_rx} | 📤 出站 {month_tx} | 🟰 {month_total}\n═══════════════\n📋 各机明细：\n{machine_lines}",
+    machine_line: "{status} {m_id}（{hostname}）📥{today_rx} 📤{today_tx} | 月📥{month_rx} 📤{month_tx}",
+  },
+  { id:"brief", name:"⚡ 速报", builtin:true,
+    body: "📊 流量速报 · {time}\n今日 {today_total}（📥{today_rx} 📤{today_tx}）｜ 本月 {month_total}\n{host_count} 台主机（{online_count} 在线）\n─────────\n{machine_lines}",
+    machine_line: "{status} {m_id}：日📥{today_rx}📤{today_tx} 月📥{month_rx}📤{month_tx}",
   },
 ];
 
@@ -1243,7 +1245,7 @@ async function getTemplates(env) {
     arr = BUILTIN_TEMPLATES.map(x => ({ ...x }));
     await setConfigValue(env, "tg_templates", JSON.stringify(arr));
   }
-  const active = (await getConfigValue(env, "tg_active")) || "simple";
+  const active = (await getConfigValue(env, "tg_active")) || "card";
   return { templates: arr, active };
 }
 
@@ -2525,12 +2527,13 @@ function tplDelete() {
   saveTplAll("已删除");
 }
 async function tplReset() {
-  if (!confirm("恢复为内置两个模板？自定义模板会丢失。")) return;
+  if (!confirm("恢复为内置 3 个模板？自定义模板会丢失。")) return;
   tplList = [
-    { id:"simple", name:"简洁日报", builtin:true, body:"📊 流量汇总\\n时间：{time}\\n主机：{host_count} 台（在线 {online_count}）\\n今日：入 {today_rx} / 出 {today_tx} / 合 {today_total}\\n本月：入 {month_rx} / 出 {month_tx} / 合 {month_total}\\n━━━━━━━━━━━━\\n{machine_lines}", machine_line:"{status} {m_id}  入{today_rx}/出{today_tx}  月{month_rx}/{month_tx}" },
-    { id:"detailed", name:"详细日报", builtin:true, body:"📊 流量详细日报\\n━━━━━━━━━━━━\\n时间：{time}\\n主机数：{host_count}（在线 {online_count}）\\n\\n【今日】入 {today_rx} / 出 {today_tx} / 合计 {today_total}\\n【本月】入 {month_rx} / 出 {month_tx} / 合计 {month_total}\\n━━━━━━━━━━━━\\n各机明细：\\n{machine_lines}", machine_line:"{status} {m_id}({hostname}) 今日 入{today_rx} 出{today_tx} | 本月 入{month_rx} 出{month_tx}" },
+    { id:"card", name:"📊 卡片日报", builtin:true, body:"📊 流量日报\\n━━━━━━━━━━━━━\\n🕐 {time}\\n🖥 主机：{host_count} 台（🟢 {online_count} 在线）\\n\\n📥 今日  入 {today_rx} ｜ 出 {today_tx}\\n🟰 合计 {today_total}\\n📅 本月  入 {month_rx} ｜ 出 {month_tx}\\n🟰 合计 {month_total}\\n━━━━━━━━━━━━━\\n{machine_lines}", machine_line:"{status} {m_id}  📥{today_rx} 📤{today_tx}" },
+    { id:"detail", name:"📈 详细日报", builtin:true, body:"📈 流量详细日报\\n═══════════════\\n🕐 时间：{time}\\n🏠 主机数：{host_count}（🟢 {online_count} 在线）\\n\\n━━ 今日 ━━\\n📥 入站 {today_rx} | 📤 出站 {today_tx} | 🟰 {today_total}\\n━━ 本月 ━━\\n📥 入站 {month_rx} | 📤 出站 {month_tx} | 🟰 {month_total}\\n═══════════════\\n📋 各机明细：\\n{machine_lines}", machine_line:"{status} {m_id}（{hostname}）📥{today_rx} 📤{today_tx} | 月📥{month_rx} 📤{month_tx}" },
+    { id:"brief", name:"⚡ 速报", builtin:true, body:"📊 流量速报 · {time}\\n今日 {today_total}（📥{today_rx} 📤{today_tx}）｜ 本月 {month_total}\\n{host_count} 台主机（{online_count} 在线）\\n─────────\\n{machine_lines}", machine_line:"{status} {m_id}：日📥{today_rx}📤{today_tx} 月📥{month_rx}📤{month_tx}" },
   ];
-  tplActiveId = "simple"; tplEditingId = "simple";
+  tplActiveId = "card"; tplEditingId = "card";
   await saveTplAll("已恢复内置");
 }
 async function tplSave() {
