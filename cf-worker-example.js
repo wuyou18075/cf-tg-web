@@ -1588,11 +1588,13 @@ function openForceResult(data) {
   document.getElementById("forceResultTitle").textContent = "获取流量结果";
   document.getElementById("forceResultDesc").textContent =
     data.message || ("推送完成：成功 " + (data.accepted || 0) + " / 失败 " + (data.failed || 0) + " / 跳过 " + (data.skipped || 0));
-  document.getElementById("forceResultNote").textContent =
-    "推送成功仅表示 VPS 回调口收到指令；列表时间更新需等该机实际上报。正在自动刷新等待上报（约 30 秒）…";
+  const pendingN = rows.filter((r) => r.state === "pushed").length;
+  document.getElementById("forceResultNote").textContent = pendingN
+    ? "推送成功表示回调已收到；列表时间等实际上报。将每 2 秒刷新，全部成功后立即停止（最长约 30 秒）。"
+    : "没有可等待上报的机器（全部跳过或推送失败），无需自动刷新。";
   document.getElementById("forceResultModal").classList.add("open");
   renderForceResult();
-  startForcePoll();
+  if (pendingN > 0) startForcePoll();
 }
 
 function renderForceResult() {
@@ -1661,40 +1663,45 @@ function closeForceResult() {
 
 function startForcePoll() {
   if (forcePollTimer) { clearTimeout(forcePollTimer); forcePollTimer = null; }
+  if (!forceTrack) return;
+  // 仅等待「推送成功」的机器；每台成功上报一次即标记，全部完成后立即停
+  const needWait = forceTrack.rows.some((r) => r.state === "pushed" && !r.reported);
+  if (!needWait) return;
+
   let n = 0;
-  const max = 15; // ~30s (2s interval)
+  const max = 15; // 最长约 30s，成功则提前结束
   const tick = async () => {
     n++;
     try {
       await refresh();
-      if (forceTrack) {
-        const byId = new Map(machines.map((m) => [m.machine_id, m]));
-        let allDone = true;
-        for (const r of forceTrack.rows) {
-          const m = byId.get(r.machine_id);
-          const ts = m ? (Number(m.ts) || 0) : 0;
-          if (ts >= forceTrack.force_at) {
-            r.reported = true;
-            r.last_ts = ts;
-          } else if (r.state === "pushed") {
-            allDone = false;
-          }
-        }
-        renderForceResult();
-        const pending = forceTrack.rows.filter((r) => r.state === "pushed" && !r.reported).length;
-        const note = document.getElementById("forceResultNote");
-        if (pending === 0) {
-          note.textContent = "全部可推送机器已完成上报，列表时间已更新。";
-        } else if (n >= max) {
-          note.textContent = "仍有 " + pending + " 台未在时限内上报。请检查 VPS 回调服务、防火墙端口与 callback_url；也可点「刷新列表」稍后查看。";
-        } else {
-          note.textContent = "等待上报中… 剩余约 " + Math.max(0, (max - n) * 2) + " 秒（已刷新 " + n + " 次）";
-        }
-        if (allDone || n >= max) {
-          forcePollTimer = null;
-          return;
+      if (!forceTrack) {
+        forcePollTimer = null;
+        return;
+      }
+      const byId = new Map(machines.map((m) => [m.machine_id, m]));
+      for (const r of forceTrack.rows) {
+        if (r.state !== "pushed" || r.reported) continue;
+        const m = byId.get(r.machine_id);
+        const ts = m ? (Number(m.ts) || 0) : 0;
+        if (ts >= forceTrack.force_at) {
+          r.reported = true;
+          r.last_ts = ts;
         }
       }
+      renderForceResult();
+      const pending = forceTrack.rows.filter((r) => r.state === "pushed" && !r.reported).length;
+      const note = document.getElementById("forceResultNote");
+      if (pending === 0) {
+        note.textContent = "全部可推送机器已完成上报，列表时间已更新。已停止自动刷新。";
+        forcePollTimer = null;
+        return; // 全部成功 → 立即停止，不再空转
+      }
+      if (n >= max) {
+        note.textContent = "仍有 " + pending + " 台未在时限内上报。请检查回调服务/防火墙；可点「刷新列表」稍后查看。已停止自动刷新。";
+        forcePollTimer = null;
+        return;
+      }
+      note.textContent = "等待上报中… 剩余 " + pending + " 台 · 已刷新 " + n + " 次 · 最长约 " + Math.max(0, (max - n) * 2) + " 秒后停止";
     } catch (e) { /* ignore poll errors */ }
     forcePollTimer = setTimeout(tick, 2000);
   };
