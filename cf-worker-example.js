@@ -12,7 +12,8 @@
  *   3. 绑定 D1：变量名必须是 DB
  *   4. 加密变量：PASSWORD（看板密码，必填）
  *                 TG_ID / TG_BOT_TOKEN（TG 汇总，可选；页面未填时使用）
- *                 每台 VPS 用看板生成的独立 access_token 上报/回调（不再用全局 TG_TOKEN）
+ *                 access_token（每台独立，推荐）或 TG_TOKEN（全局通用，可选，方便批量）
+ *                 获取流量推送/回调仍需 per-machine access_token
  *   5. 再部署一次使绑定生效
  */
 
@@ -126,6 +127,16 @@ function randomNonce(len = 16) {
 
 function bashSingleQuote(s) {
   return String(s).replace(/'/g, `'\''`);
+}
+
+/** 全局上报密码（TG_TOKEN）：可选，方便批量部署时所有 VPS 共用一个密码 */
+function reportAuth(req, env) {
+  const h = req.headers.get("authorization") || "";
+  const m = /^Bearer\s+(.+)$/i.exec(h);
+  if (!env.TG_TOKEN || !m) return false;
+  const got = String(m[1] || "").replace(/\r/g, "").trim();
+  const exp = String(env.TG_TOKEN || "").replace(/\r/g, "").trim();
+  return !!(got && exp && got === exp);
 }
 
 /** 从请求取出 Bearer token（已 trim） */
@@ -2412,9 +2423,11 @@ export default {
         return json({ ok: false, error: "machine_id invalid" }, 400);
       }
 
-      // 鉴权：只认该机 access_token（vps_tokens）
+      // 鉴权：优先该机 access_token；兼容全局 TG_TOKEN（批量部署用一个密码）
       const bearer = extractBearer(req);
-      if (!bearer || !(await verifyVpsToken(env, mid, bearer))) {
+      const okVps = bearer ? await verifyVpsToken(env, mid, bearer) : false;
+      const okGlobal = reportAuth(req, env);
+      if (!okVps && !okGlobal) {
         return json({ ok: false, error: "unauthorized" }, 401);
       }
 
@@ -2452,7 +2465,8 @@ export default {
       const mid = String(req.headers.get("x-machine-id") || url.searchParams.get("mid") || "").trim();
       if (!isValidMachineId(mid)) return json({ ok: false, error: "machine_id invalid" }, 400);
       const token = extractBearer(req);
-      if (!token || !(await verifyVpsToken(env, mid, token))) {
+      const okVps = token ? await verifyVpsToken(env, mid, token) : false;
+      if (!okVps && !reportAuth(req, env)) {
         return json({ ok: false, error: "unauthorized" }, 401);
       }
       const force_report = await agentShouldForceReport(env, mid);
