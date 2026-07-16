@@ -182,7 +182,8 @@ function sessionCookie(token, maxAge = SESSION_TTL) {
 }
 
 async function requireDash(req, env) {
-  if (!env.PASSWORD) return true;
+  // 未配 PASSWORD：视为未登录，拦截到登录页并提示配置（不再裸奔放行）
+  if (!env.PASSWORD) return false;
   return verifySessionToken(parseCookies(req)[COOKIE_NAME], env);
 }
 
@@ -406,6 +407,47 @@ async function getConfig(env) {
     t_token_from_env: !pageToken && !!envToken,
     t_id_from_env: !pageId && !!envId,
   };
+}
+
+/** TG 配置状态：not_configured / incomplete / invalid / ready / ok */
+async function getTgStatus(env, verify = false) {
+  const cfg = await getConfig(env);
+  const token = cfg.t_token || "";
+  const id = cfg.t_id || "";
+  const source = {
+    token: cfg.t_token_from_env ? "环境变量 TG_BOT_TOKEN" : (token ? "看板设置" : "未配置"),
+    id: cfg.t_id_from_env ? "环境变量 TG_ID" : (id ? "看板设置" : "未配置"),
+  };
+  if (!token && !id) {
+    return { state: "not_configured", detail: "未配置 Bot Token 与 Chat ID", source };
+  }
+  if (!token) return { state: "incomplete", detail: "缺少 Bot Token", source };
+  if (!id) return { state: "incomplete", detail: "缺少 Chat ID", source };
+  if (!/^\d{5,20}:[A-Za-z0-9_-]{20,100}$/.test(token)) {
+    return { state: "invalid", detail: "Bot Token 格式错误", source };
+  }
+  if (!/^-?\d{5,20}$/.test(id)) {
+    return { state: "invalid", detail: "Chat ID 格式错误", source };
+  }
+  if (verify) {
+    try {
+      const r1 = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+      const j1 = await r1.json();
+      if (!j1.ok) {
+        return { state: "invalid", detail: "Bot Token 验证失败：" + (j1.description || "无效"), source };
+      }
+      const bot = (j1.result && j1.result.username) ? ("@" + j1.result.username) : "";
+      const r2 = await fetch(`https://api.telegram.org/bot${token}/getChat?chat_id=${encodeURIComponent(id)}`);
+      const j2 = await r2.json();
+      if (!j2.ok) {
+        return { state: "invalid", detail: "Chat ID 不可达：" + (j2.description || "需先向 bot 发消息/加群"), source, bot };
+      }
+      return { state: "ok", detail: "验证通过" + (bot ? "，Bot " + bot : ""), source, bot };
+    } catch (e) {
+      return { state: "invalid", detail: "验证请求失败：" + (e && e.message ? e.message : e), source };
+    }
+  }
+  return { state: "ready", detail: "配置完整（点测试可真实校验）", source };
 }
 
 async function saveConfig(env, data) {
@@ -1132,7 +1174,24 @@ ${lines}${more}`;
 
 // ─── 页面 ───
 
-function loginPage(err = "") {
+function loginPage(err = "", opts = {}) {
+  const noPwd = !!opts.noPassword;
+  const tip = noPwd
+    ? `<div class="warn">⚠️ 尚未配置登录密码。请在 Cloudflare Dashboard → Worker → 设置 → 加密变量 添加 <code>PASSWORD</code> 后再登录。</div>`
+    : "";
+  const form = noPwd
+    ? `<div class="err">${err ? esc(err) : "未配置密码，无法登录。"}</div>
+       <form method="post" action="/login" onsubmit="return false;">
+         <label for="pw">密码</label>
+         <input id="pw" name="password" type="password" autocomplete="current-password" disabled>
+         <button type="submit" disabled>登录</button>
+       </form>`
+    : `<div class="err">${err ? esc(err) : ""}</div>
+       <form method="post" action="/login">
+         <label for="pw">密码</label>
+         <input id="pw" name="password" type="password" autocomplete="current-password" required autofocus>
+         <button type="submit">登录</button>
+       </form>`;
   return `<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1143,24 +1202,24 @@ function loginPage(err = "") {
 <style>
 :root{color-scheme:dark}
 body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:"Noto Sans SC","Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;background:#0b1220;color:#e8eefc}
-.card{width:min(360px,92vw);background:#121a2b;border:1px solid #243049;border-radius:14px;padding:28px 24px;box-shadow:0 12px 40px #0006}
+.card{width:min(380px,92vw);background:#121a2b;border:1px solid #243049;border-radius:14px;padding:28px 24px;box-shadow:0 12px 40px #0006}
 h1{font-size:18px;margin:0 0 6px}
 p{margin:0 0 18px;color:#8aa0c6;font-size:13px}
 label{display:block;font-size:12px;color:#9fb3d9;margin-bottom:6px}
 input{width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid #33415f;background:#0b1220;color:#e8eefc;margin-bottom:14px;outline:none}
 input:focus{border-color:#3b82f6}
+input:disabled{opacity:.5}
 button{width:100%;padding:10px 12px;border:0;border-radius:8px;background:#3b82f6;color:#fff;font-weight:600;cursor:pointer}
+button:disabled{background:#33415f;cursor:not-allowed}
 .err{color:#fca5a5;font-size:13px;margin-bottom:10px;min-height:1.2em}
+.warn{background:#2a2008;border:1px solid #78350f;color:#fbbf24;padding:12px;border-radius:8px;font-size:12px;line-height:1.6;margin-bottom:14px}
+.warn code{background:#1a1407;padding:1px 5px;border-radius:4px}
 </style>
 <div class="card">
   <h1>流量看板</h1>
-  <p>请输入管理密码</p>
-  <div class="err">${err ? esc(err) : ""}</div>
-  <form method="post" action="/login">
-    <label for="pw">密码</label>
-    <input id="pw" name="password" type="password" autocomplete="current-password" required autofocus>
-    <button type="submit">登录</button>
-  </form>
+  <p>${noPwd ? "需要配置密码" : "请输入管理密码"}</p>
+  ${tip}
+  ${form}
 </div>`;
 }
 
@@ -1259,6 +1318,20 @@ td.ops button{margin-right:4px}
 .badge.wait{background:#0b1a2e;color:#93c5fd;border-color:#1e3a5f}
 .badge.reported{background:#0c2a1a;color:#6ee7b7;border-color:#065f46}
 .result-note{font-size:12px;color:#8aa0c6;margin:10px 0 0;line-height:1.5}
+.tg-pill{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;font-size:12px;border:1px solid #33415f;background:#0b1220;cursor:pointer;user-select:none;white-space:nowrap}
+.tg-pill .dot{width:8px;height:8px;border-radius:50%}
+.tg-pill.s-ok{color:#34d399;border-color:#14532d;background:#052e1a}
+.tg-pill.s-ok .dot{background:#34d399}
+.tg-pill.s-ready{color:#93c5fd;border-color:#1e3a5f;background:#0b1a2e}
+.tg-pill.s-ready .dot{background:#93c5fd}
+.tg-pill.s-incomplete{color:#fbbf24;border-color:#78350f;background:#2a2008}
+.tg-pill.s-incomplete .dot{background:#fbbf24}
+.tg-pill.s-invalid{color:#f87171;border-color:#7f1d1d;background:#2a0f0f}
+.tg-pill.s-invalid .dot{background:#f87171}
+.tg-pill.s-not_configured{color:#8aa0c6;border-color:#33415f;background:#0b1220}
+.tg-pill.s-not_configured .dot{background:#8aa0c6}
+.tg-tip{font-size:11px;color:#8aa0c6;margin-left:4px}
+
 
 
 </style>
@@ -1284,6 +1357,9 @@ td.ops button{margin-right:4px}
       <button class="primary" onclick="openAddVps()">＋ 添加 VPS</button>
       <button onclick="refresh()">刷新</button>
       <button class="green" onclick="forceFetchAll()" id="btnForceFetch" title="签名推送到各 VPS 回调口立即上报（需公网；无 poll）">获取流量</button>
+      <span id="tgStatus" class="tg-pill s-not_configured" title="点击重新检测" onclick="loadTgStatus(true)">
+        <span class="dot"></span><span id="tgStatusText">TG: 检测中</span>
+      </span>
       <span id="tgSumStatus" class="muted" style="font-size:12px;margin-left:4px"></span>
     </div>
     <div class="cards" id="summary"></div>
@@ -1796,6 +1872,42 @@ async function loadHistModal() {
   }
 }
 
+const TG_LABEL = {
+  ok: "TG 正常",
+  ready: "TG 待验证",
+  incomplete: "TG 配置不完整",
+  invalid: "TG 不可用",
+  not_configured: "TG 未配置",
+};
+
+async function loadTgStatus(verify = false) {
+  const el = document.getElementById("tgStatus");
+  const txt = document.getElementById("tgStatusText");
+  if (!el) return;
+  el.className = "tg-pill s-not_configured";
+  txt.textContent = "TG: 检测中";
+  try {
+    const q = verify ? "?verify=1" : "";
+    const d = await api("/api/tg-status" + q);
+    if (!d) return;
+    const s = d.state || "not_configured";
+    el.className = "tg-pill s-" + s;
+    txt.textContent = TG_LABEL[s] || s;
+    let tip = d.detail || "";
+    if (d.source) {
+      const parts = [];
+      if (d.source.token) parts.push("Token来源:" + d.source.token);
+      if (d.source.id) parts.push("ChatID来源:" + d.source.id);
+      if (parts.length) tip += (tip ? " · " : "") + parts.join(" ");
+    }
+    el.title = (tip || "") + "（点击重新检测）";
+  } catch (e) {
+    el.className = "tg-pill s-invalid";
+    txt.textContent = "TG: 检测失败";
+    el.title = String(e && e.message ? e.message : e);
+  }
+}
+
 async function refresh() {
   try {
     const data = await api("/api/machines");
@@ -1804,6 +1916,7 @@ async function refresh() {
     renderSummary();
     renderTable();
     await loadHistory();
+    loadTgStatus(false);
   } catch (e) {
     toast("刷新失败：" + (e && e.message ? e.message : String(e)));
   }
@@ -2339,13 +2452,17 @@ export default {
     // /login /logout
     if (url.pathname === "/login") {
       if (req.method === "GET") {
-        if (await requireDash(req, env)) return Response.redirect(new URL("/", url).toString(), 302);
-        return html(loginPage());
+        if (env.PASSWORD && (await requireDash(req, env))) {
+          return Response.redirect(new URL("/", url).toString(), 302);
+        }
+        return html(loginPage("", { noPassword: !env.PASSWORD }));
       }
       if (req.method === "POST") {
         const form = await req.formData();
         const pw = String(form.get("password") || "");
-        if (!env.PASSWORD) return Response.redirect(new URL("/", url).toString(), 302);
+        if (!env.PASSWORD) {
+          return html(loginPage("未配置 PASSWORD 加密变量，无法登录。请先到 Cloudflare Dashboard 添加。", { noPassword: true }), 401);
+        }
         if (pw !== env.PASSWORD) return html(loginPage("密码错误"), 401);
         const token = await makeSessionToken(env);
         return new Response(null, { status: 302, headers: { Location: "/", "Set-Cookie": sessionCookie(token) } });
@@ -2376,6 +2493,17 @@ export default {
     if (!(await requireDash(req, env))) {
       if (url.pathname.startsWith("/api/")) return json({ ok: false, error: "unauthorized" }, 401);
       return Response.redirect(new URL("/login", url).toString(), 302);
+    }
+
+    // GET /api/tg-status — TG 配置状态（可选 verify=1 真实验证）
+    if (req.method === "GET" && url.pathname === "/api/tg-status") {
+      try {
+        const verify = url.searchParams.get("verify") === "1";
+        const s = await getTgStatus(env, verify);
+        return json({ ok: true, ...s });
+      } catch (e) {
+        return json({ ok: false, error: String(e && e.message ? e.message : e) }, 500);
+      }
     }
 
     // GET /api/machines
