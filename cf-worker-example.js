@@ -203,7 +203,13 @@ async function ensureSchema(env) {
   try {
     await env.DB.prepare(`ALTER TABLE machines ADD COLUMN callback_url TEXT`).run();
   } catch {}
+  try {
+    await env.DB.prepare(`ALTER TABLE machines ADD COLUMN online_sec INTEGER DEFAULT 0`).run();
+  } catch {}
 }
+
+/** 上报间隔 ≤ 此秒数视为连续在线，计入累积在线时长（与看板「在线」2h 一致） */
+const ONLINE_GAP_SEC = 7200;
 
 // ─── 数据操作 ───
 
@@ -216,17 +222,30 @@ async function upsertReport(env, rec) {
   const cbRaw = rec.callback_url != null ? String(rec.callback_url).trim() : "";
   const callback_url = isValidCallbackUrl(cbRaw) ? cbRaw : null;
 
+  // 累积在线：若与上次上报间隔 ≤ ONLINE_GAP_SEC，则把间隔计入 online_sec
+  const prev = await env.DB.prepare(
+    `SELECT last_ts, online_sec FROM machines WHERE machine_id = ?`
+  ).bind(mid).first();
+  let online_sec = prev ? (Number(prev.online_sec) || 0) : 0;
+  if (prev && prev.last_ts != null) {
+    const gap = ts - Number(prev.last_ts);
+    if (gap > 0 && gap <= ONLINE_GAP_SEC) {
+      online_sec += gap;
+    }
+  }
+
   await env.DB.prepare(
-    `INSERT INTO machines (machine_id, hostname, interface, last_ts, today_rx, today_tx, month_rx, month_tx, updated_at, callback_url)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO machines (machine_id, hostname, interface, last_ts, today_rx, today_tx, month_rx, month_tx, updated_at, callback_url, online_sec)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(machine_id) DO UPDATE SET
        hostname=excluded.hostname, interface=excluded.interface,
        last_ts=excluded.last_ts, today_rx=excluded.today_rx, today_tx=excluded.today_tx,
        month_rx=excluded.month_rx, month_tx=excluded.month_tx, updated_at=excluded.updated_at,
-       callback_url=COALESCE(excluded.callback_url, machines.callback_url)`
+       callback_url=COALESCE(excluded.callback_url, machines.callback_url),
+       online_sec=excluded.online_sec`
   ).bind(mid, rec.hostname || "", rec.interface || "", ts,
     Number(today.rx) || 0, Number(today.tx) || 0,
-    Number(month.rx) || 0, Number(month.tx) || 0, now, callback_url
+    Number(month.rx) || 0, Number(month.tx) || 0, now, callback_url, online_sec
   ).run();
 
   // 节流写历史（5 分钟窗口）
@@ -249,13 +268,24 @@ async function listMachines(env) {
   const { results } = await env.DB.prepare(
     `SELECT * FROM machines ORDER BY last_ts DESC`
   ).all();
-  return (results || []).map((r) => ({
-    machine_id: r.machine_id, hostname: r.hostname, interface: r.interface, ts: r.last_ts,
-    today: { rx: r.today_rx || 0, tx: r.today_tx || 0, total: (r.today_rx || 0) + (r.today_tx || 0) },
-    month: { rx: r.month_rx || 0, tx: r.month_tx || 0, total: (r.month_rx || 0) + (r.month_tx || 0) },
-    updated_at: r.updated_at,
-    callback_url: r.callback_url || "",
-  }));
+  const nowSec = Math.floor(Date.now() / 1000);
+  return (results || []).map((r) => {
+    const base = Number(r.online_sec) || 0;
+    const lastTs = Number(r.last_ts) || 0;
+    // 当前仍在线：把距上次上报的时间也算进展示值
+    const liveExtra = (lastTs && (nowSec - lastTs) >= 0 && (nowSec - lastTs) < ONLINE_GAP_SEC)
+      ? (nowSec - lastTs)
+      : 0;
+    return {
+      machine_id: r.machine_id, hostname: r.hostname, interface: r.interface, ts: r.last_ts,
+      today: { rx: r.today_rx || 0, tx: r.today_tx || 0, total: (r.today_rx || 0) + (r.today_tx || 0) },
+      month: { rx: r.month_rx || 0, tx: r.month_tx || 0, total: (r.month_rx || 0) + (r.month_tx || 0) },
+      updated_at: r.updated_at,
+      callback_url: r.callback_url || "",
+      online_sec: base,
+      online_sec_live: base + liveExtra,
+    };
+  });
 }
 
 async function getHistory(env, mid, hours) {
@@ -1118,9 +1148,9 @@ td.ops button{margin-right:4px}
         <table>
           <thead><tr>
             <th>机器</th><th>主机</th><th>网卡</th>
-            <th>今日入/出</th><th>本月入/出</th><th>最后上报</th><th>状态</th><th>操作</th>
+            <th>今日入/出</th><th>本月入/出</th><th>累积在线</th><th>最后上报</th><th>状态</th><th>操作</th>
           </tr></thead>
-          <tbody id="tbody"><tr><td colspan="8">加载中…</td></tr></tbody>
+          <tbody id="tbody"><tr><td colspan="9">加载中…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -1268,6 +1298,20 @@ td.ops button{margin-right:4px}
 <script>
 const gb = (n) => ((Number(n)||0)/1e9).toFixed(3) + "GB";
 const fmtTime = (ts) => ts ? new Date(ts*1000).toLocaleString() : "-";
+/** 秒 → 可读时长，如 3天5小时 / 12小时30分 / 45分 */
+const fmtDuration = (sec) => {
+  let s = Math.max(0, Math.floor(Number(sec) || 0));
+  if (s < 60) return s + "秒";
+  const d = Math.floor(s / 86400); s %= 86400;
+  const h = Math.floor(s / 3600); s %= 3600;
+  const m = Math.floor(s / 60);
+  const parts = [];
+  if (d) parts.push(d + "天");
+  if (h) parts.push(h + "小时");
+  if (m && d < 30) parts.push(m + "分"); // 很长时省略分钟
+  if (!parts.length) parts.push(m + "分");
+  return parts.join("");
+};
 const esc = (s) => String(s ?? "")
   .replace(/&/g, "&amp;").replace(/</g, "&lt;")
   .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -1332,7 +1376,7 @@ function renderTable() {
   if (!machines.length) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 8;
+    td.colSpan = 9;
     td.textContent = "暂无数据";
     tr.appendChild(td);
     tb.appendChild(tr);
@@ -1343,12 +1387,16 @@ function renderTable() {
     if (m.machine_id === selected) tr.classList.add("active");
     tr.dataset.mid = m.machine_id || "";
 
+    const uptime = (m.online_sec_live != null)
+      ? m.online_sec_live
+      : (Number(m.online_sec) || 0);
     const texts = [
       m.machine_id || "",
       m.hostname || "",
       m.interface || "",
       gb(m.today && m.today.rx) + " / " + gb(m.today && m.today.tx),
       gb(m.month && m.month.rx) + " / " + gb(m.month && m.month.tx),
+      fmtDuration(uptime),
       fmtTime(m.ts),
     ];
     for (const text of texts) {
