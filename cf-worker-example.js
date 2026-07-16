@@ -625,7 +625,111 @@ async function agentShouldForceReport(env, mid) {
 
 
 /**
+ * 主机名是否为 IPv4 / IPv6（Workers fetch 直连 IP 会 403/1003）
+ */
+function isIpHostname(host) {
+  const h = String(host || "").replace(/^\[|\]$/g, "");
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(h)) return true;
+  if (h.includes(":")) return true; // 粗判 IPv6
+  return false;
+}
+
+/**
+ * 经 TCP Socket 发送裸 HTTP/1.1 POST（绕过 fetch 禁止直连 IP 的 1003）
+ * 仅用于 http://IP:port/... 回调；https IP 不支持（无 TLS 握手）
+ */
+async function httpPostViaTcpSocket(urlStr, headerMap, bodyStr, timeoutMs = 8000) {
+  const u = new URL(urlStr);
+  if (u.protocol !== "http:") {
+    throw new Error("IP 回调仅支持 http://（Workers 无法对 IP 做 fetch/TLS）");
+  }
+  const hostname = u.hostname.replace(/^\[|\]$/g, "");
+  const port = Number(u.port) || 80;
+  const path = (u.pathname || "/") + (u.search || "");
+  const body = bodyStr || "";
+  const hostHeader = u.host; // 含端口
+
+  let connect;
+  try {
+    ({ connect } = await import("cloudflare:sockets"));
+  } catch (e) {
+    throw new Error("当前 Worker 不支持 cloudflare:sockets，无法直连 IP。请改用域名 cb_url，或确认套餐支持 TCP sockets");
+  }
+
+  const socket = connect({ hostname, port });
+  // 等待 TCP 建连（失败会 reject）
+  if (socket.opened) await socket.opened;
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+
+  const lines = [
+    "POST " + path + " HTTP/1.1",
+    "Host: " + hostHeader,
+    "Connection: close",
+    "Content-Type: " + (headerMap["Content-Type"] || "application/json"),
+    "Content-Length: " + encoder.encode(body).byteLength,
+  ];
+  for (const [k, v] of Object.entries(headerMap)) {
+    if (/^content-type$/i.test(k) || /^content-length$/i.test(k) || /^host$/i.test(k)) continue;
+    lines.push(k + ": " + v);
+  }
+  const req = lines.join("\r\n") + "\r\n\r\n" + body;
+
+  let timer;
+  const timeoutPromise = new Promise((_, rej) => {
+    timer = setTimeout(() => rej(new Error("TCP 连接/读取超时 " + timeoutMs + "ms")), timeoutMs);
+  });
+
+  const work = (async () => {
+    const writer = socket.writable.getWriter();
+    try {
+      await writer.write(encoder.encode(req));
+    } finally {
+      try { await writer.close(); } catch { /* ignore */ }
+    }
+
+    const reader = socket.readable.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value && value.byteLength) {
+          chunks.push(value);
+          total += value.byteLength;
+          if (total > 65536) break;
+        }
+      }
+    } finally {
+      try { reader.releaseLock(); } catch { /* ignore */ }
+      try { socket.close(); } catch { /* ignore */ }
+    }
+
+    let raw = "";
+    for (const c of chunks) raw += decoder.decode(c, { stream: true });
+    raw += decoder.decode();
+
+    const sep = raw.indexOf("\r\n\r\n");
+    const head = sep >= 0 ? raw.slice(0, sep) : raw;
+    const respBody = sep >= 0 ? raw.slice(sep + 4) : "";
+    const statusLine = head.split("\r\n")[0] || "";
+    const m = /^HTTP\/\d\.\d\s+(\d{3})/i.exec(statusLine);
+    const status = m ? Number(m[1]) : 0;
+    return { ok: status >= 200 && status < 300, status, body: respBody.slice(0, 200) };
+  })();
+
+  try {
+    return await Promise.race([work, timeoutPromise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * 向单台 VPS 回调口发送签名请求（Bearer + HMAC + 时间窗）
+ * - 域名：fetch
+ * - 裸 IP：TCP sockets 发 HTTP（避免 CF Error 1003 Direct IP access not allowed）
  */
 async function pushForceToCallback(callbackUrl, token, forceAt) {
   const bodyObj = { cmd: "force_report", at: forceAt };
@@ -633,22 +737,49 @@ async function pushForceToCallback(callbackUrl, token, forceAt) {
   const ts = String(Math.floor(Date.now() / 1000));
   const nonce = randomNonce(16);
   const sig = await hmacSha256Hex(token, [ts, nonce, body].join(String.fromCharCode(10)));
+  const headers = {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer " + token,
+    "X-Timestamp": ts,
+    "X-Nonce": nonce,
+    "X-Signature": sig,
+  };
+
+  let urlObj;
+  try {
+    urlObj = new URL(callbackUrl);
+  } catch {
+    return { ok: false, status: 0, body: "invalid callback_url" };
+  }
+
+  // 裸 IP：禁止用 fetch（1003），改走 TCP
+  if (isIpHostname(urlObj.hostname)) {
+    try {
+      return await httpPostViaTcpSocket(callbackUrl, headers, body, 8000);
+    } catch (e) {
+      const msg = String(e && e.message ? e.message : e);
+      return { ok: false, status: 0, body: msg.slice(0, 200) };
+    }
+  }
+
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 8000);
   try {
     const res = await fetch(callbackUrl, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-        "X-Timestamp": ts,
-        "X-Nonce": nonce,
-        "X-Signature": sig,
-      },
+      headers,
       body,
       signal: ctrl.signal,
     });
     const textBody = await res.text().catch(() => "");
+    // 若仍撞上 1003，给出可读说明
+    if (res.status === 403 && /1003/.test(textBody)) {
+      return {
+        ok: false,
+        status: 403,
+        body: "CF 1003：禁止直连 IP。请确认 callback 为域名，或 Worker 已用 TCP sockets 推送 IP",
+      };
+    }
     return { ok: res.ok, status: res.status, body: textBody.slice(0, 200) };
   } catch (e) {
     return { ok: false, status: 0, body: String(e && e.message ? e.message : e) };
@@ -1551,8 +1682,14 @@ function reasonLabel(state, detail, status) {
   if (state === "pushed") return "回调已接受";
   if (state === "push_fail") {
     const d = String(detail || "");
-    if (/abort|Timeout|timeout/i.test(d)) return "超时（VPS 无响应/防火墙）";
-    if (/Failed to fetch|NetworkError|fetch failed/i.test(d)) return "网络不可达";
+    if (/1003|Direct IP|直连 IP|禁止直连/i.test(d)) {
+      return "CF 禁止 fetch 直连 IP(1003)；已改 TCP 推送，若仍失败请查防火墙/端口或改用域名 cb_url";
+    }
+    if (/sockets|cloudflare:sockets/i.test(d)) {
+      return "Worker 不支持 TCP sockets，请设置域名形式的 cb_url";
+    }
+    if (/abort|Timeout|timeout|超时/i.test(d)) return "超时（VPS 无响应/防火墙未放行回调端口）";
+    if (/Failed to fetch|NetworkError|fetch failed|ECONNREFUSED|connection/i.test(d)) return "网络不可达（检查公网 IP 与端口）";
     if (detail) return (status ? ("HTTP " + status + " ") : "") + d.slice(0, 120);
     return "推送失败";
   }
