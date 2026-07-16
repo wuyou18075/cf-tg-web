@@ -150,7 +150,8 @@ cf_time='0 * * * *' \
 - 表格：今日/本月入站出站
 - 点击行切换曲线（24h / 3d / 7d / 30d）
 - 2 小时内有上报标为在线
-- 每行 **更新注册** / **删除**：更新会弹窗复用参数并生成升级命令；删除清除看板数据与 token
+- 每行 **更新注册** / **删除**
+- **获取流量**：Worker 签名推送到各 VPS 公网回调 `/force-report`（需 cb 服务）；安装/开机仍立即上报一次：更新会弹窗复用参数并生成升级命令；删除清除看板数据与 token
 
 ---
 
@@ -190,6 +191,7 @@ systemctl status traffic-telegram-report-cf.timer      # CF 定时器
 
 systemctl start traffic-telegram-report.service        # 立即发 TG
 systemctl start traffic-telegram-report-cf.service     # 立即 CF 上报
+systemctl status traffic-telegram-report-cb.service    # 回调监听（获取流量）
 
 journalctl -u traffic-telegram-report.service
 journalctl -u traffic-telegram-report-cf.service
