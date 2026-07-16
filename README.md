@@ -64,14 +64,20 @@ journalctl -u traffic-telegram-report.service
 仓库已配置 `wrangler.toml`（`name = "cf-tg-web"`）与 `.github/workflows/deploy.yml`。  
 **不要把 `database_id` 写进仓库**；D1 一律在 Dashboard 绑定（见第 3 步）。
 
-若用 GitHub Actions，在仓库 Secrets 配置：
+若用 GitHub Actions，在仓库 **Settings → Secrets and variables → Actions** 配置：
 
-| 密钥 | 说明 |
-|------|------|
-| `CLOUDFLARE_API_TOKEN` | Workers 部署权限 |
-| `CLOUDFLARE_ACCOUNT_ID` | 账号 ID |
+| 密钥 | 必填 | 说明 |
+|------|------|------|
+| `CLOUDFLARE_API_TOKEN` | 是 | Workers 部署权限 |
+| `CLOUDFLARE_ACCOUNT_ID` | 是 | 账号 ID |
+| `PASSWORD` | 是 | 看板登录密码；部署时自动写入 Worker 加密变量 |
+| `TG_BOT_TOKEN` | 否 | 机器人 Token；页面未填时用于 TG 汇总 |
+| `TG_ID` | 否 | 聊天 ID；页面未填时用于 TG 汇总 |
+| `TG_TOKEN` | 否 | 兼容旧版全局上报密码；新版 VPS 用独立 token |
 
-若用 Cloudflare Workers Builds 连接本仓库：Deploy command 用默认 `npx wrangler deploy` 即可；同样**不要**在 `wrangler.toml` 里写无效 `database_id`。
+每次 `git push` / 手动跑 workflow 时，`deploy.yml` 会部署 Worker，并把上表中的 `PASSWORD` / `TG_*` **自动创建或更新**为 Cloudflare Worker 加密变量（无需再去 Dashboard 手填）。`TG_*` 若未配置则跳过，不会清空线上已有值。
+
+若用 Cloudflare Workers Builds 连接本仓库：Deploy command 用默认 `npx wrangler deploy` 即可；同样**不要**在 `wrangler.toml` 里写无效 `database_id`。Builds 不会自动同步加密变量，需在 Dashboard 手动配置（见第 4 步）。
 
 ### 第 3 步：绑定 D1（必做，且要写进 wrangler.toml）
 
@@ -93,9 +99,11 @@ database_id = "你的-UUID"
 
 **临时：** Dashboard → Worker → 设置 → 绑定 → D1，变量名 `DB`，然后对该 Worker **再点一次部署**（只绑不定部署会仍无 `env.DB`）。
 
-### 第 4 步：加密变量
+### 第 4 步：加密变量（GitHub Actions 已自动同步时可跳过）
 
-**设置** → **变量** → **加密变量**：
+**推荐：** 只在 GitHub Secrets 配置 `PASSWORD` / `TG_*`，由 Actions 部署时自动写入 Worker。
+
+**手动（Dashboard 或 Builds）：** **设置** → **变量** → **加密变量**：
 
 | 变量名 | 值 | 说明 |
 |--------|----|------|
