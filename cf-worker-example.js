@@ -62,42 +62,6 @@ function isValidMachineId(mid) {
   return /^[\u4e00-\u9fffA-Za-z0-9._:-]{1,64}$/.test(id);
 }
 
-function isValidCallbackUrl(u) {
-  if (!u || typeof u !== "string") return false;
-  if (u.length < 12 || u.length > 256) return false;
-  try {
-    const x = new URL(u);
-    if (x.protocol !== "http:" && x.protocol !== "https:") return false;
-    if (!x.pathname || x.pathname === "/") return false;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function toHex(buf) {
-  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-async function hmacSha256Hex(secret, message) {
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(message));
-  return toHex(sig);
-}
-
-function randomNonce(len = 16) {
-  const buf = new Uint8Array(len);
-  crypto.getRandomValues(buf);
-  return toHex(buf);
-}
-
 function bashSingleQuote(s) {
   return String(s).replace(/'/g, `'\''`);
 }
@@ -176,10 +140,6 @@ async function ensureSchema(env) {
         machine_id TEXT PRIMARY KEY, token TEXT NOT NULL, created_at INTEGER
       )`),
   ]);
-  // 兼容已有库：补 callback_url 列
-  try {
-    await env.DB.prepare(`ALTER TABLE machines ADD COLUMN callback_url TEXT`).run();
-  } catch {}
 }
 
 // ─── 数据操作 ───
@@ -190,20 +150,17 @@ async function upsertReport(env, rec) {
   const today = rec.today || {};
   const month = rec.month || {};
   const now = Math.floor(Date.now() / 1000);
-  const cbRaw = rec.callback_url != null ? String(rec.callback_url).trim() : "";
-  const callback_url = isValidCallbackUrl(cbRaw) ? cbRaw : null;
 
   await env.DB.prepare(
-    `INSERT INTO machines (machine_id, hostname, interface, last_ts, today_rx, today_tx, month_rx, month_tx, updated_at, callback_url)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO machines (machine_id, hostname, interface, last_ts, today_rx, today_tx, month_rx, month_tx, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(machine_id) DO UPDATE SET
        hostname=excluded.hostname, interface=excluded.interface,
        last_ts=excluded.last_ts, today_rx=excluded.today_rx, today_tx=excluded.today_tx,
-       month_rx=excluded.month_rx, month_tx=excluded.month_tx, updated_at=excluded.updated_at,
-       callback_url=COALESCE(excluded.callback_url, machines.callback_url)`
+       month_rx=excluded.month_rx, month_tx=excluded.month_tx, updated_at=excluded.updated_at`
   ).bind(mid, rec.hostname || "", rec.interface || "", ts,
     Number(today.rx) || 0, Number(today.tx) || 0,
-    Number(month.rx) || 0, Number(month.tx) || 0, now, callback_url
+    Number(month.rx) || 0, Number(month.tx) || 0, now
   ).run();
 
   // 节流写历史（5 分钟窗口）
@@ -231,7 +188,6 @@ async function listMachines(env) {
     today: { rx: r.today_rx || 0, tx: r.today_tx || 0, total: (r.today_rx || 0) + (r.today_tx || 0) },
     month: { rx: r.month_rx || 0, tx: r.month_tx || 0, total: (r.month_rx || 0) + (r.month_tx || 0) },
     updated_at: r.updated_at,
-    callback_url: r.callback_url || "",
   }));
 }
 
@@ -323,140 +279,45 @@ async function deleteVpsToken(env, mid) {
   await env.DB.prepare(`DELETE FROM vps_tokens WHERE machine_id = ?`).bind(mid).run();
 }
 
-/** 看板「获取流量」：写入全局强制上报时间戳（秒） */
-async function setForceReportAll(env) {
-  if (!env.DB) throw new Error(missingDbError(env));
-  const now = Math.floor(Date.now() / 1000);
-  await env.DB.prepare(
-    `INSERT INTO config (key, value, updated_at) VALUES ('force_report_at', ?, ?)
-     ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`
-  ).bind(String(now), now).run();
-  return now;
-}
-
-async function getForceReportAt(env) {
-  if (!env.DB) return 0;
-  try {
-    const row = await env.DB.prepare(
-      `SELECT value FROM config WHERE key = 'force_report_at'`
-    ).first();
-    return row ? Number(row.value) || 0 : 0;
-  } catch {
-    return 0;
-  }
-}
-
-/**
- * Agent 轮询：若全局强制时间晚于本机 last_ts，则要求立即上报。
- * 强制指令 15 分钟后过期。
- */
-async function agentShouldForceReport(env, mid) {
-  const forceAt = await getForceReportAt(env);
-  if (!forceAt) return false;
-  const now = Math.floor(Date.now() / 1000);
-  if (now - forceAt > 15 * 60) return false;
-  const row = await env.DB.prepare(
-    `SELECT last_ts FROM machines WHERE machine_id = ?`
-  ).bind(mid).first();
-  const lastTs = row ? Number(row.last_ts) || 0 : 0;
-  return lastTs < forceAt;
-}
-
-
-/**
- * 向单台 VPS 回调口发送签名请求（Bearer + HMAC + 时间窗）
- */
-async function pushForceToCallback(callbackUrl, token, forceAt) {
-  const bodyObj = { cmd: "force_report", at: forceAt };
-  const body = JSON.stringify(bodyObj);
-  const ts = String(Math.floor(Date.now() / 1000));
-  const nonce = randomNonce(16);
-  const sig = await hmacSha256Hex(token, [ts, nonce, body].join(String.fromCharCode(10)));
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 8000);
-  try {
-    const res = await fetch(callbackUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-        "X-Timestamp": ts,
-        "X-Nonce": nonce,
-        "X-Signature": sig,
-      },
-      body,
-      signal: ctrl.signal,
-    });
-    const textBody = await res.text().catch(() => "");
-    return { ok: res.ok, status: res.status, body: textBody.slice(0, 200) };
-  } catch (e) {
-    return { ok: false, status: 0, body: String(e && e.message ? e.message : e) };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
- * 看板「获取流量」：写 force 标记 + 并发推送到有 callback_url 的机器
- */
-async function forceReportPushAll(env) {
-  const force_at = await setForceReportAll(env);
-  const { results } = await env.DB.prepare(
-    `SELECT m.machine_id, m.callback_url, t.token
-     FROM machines m
-     LEFT JOIN vps_tokens t ON t.machine_id = m.machine_id
-     ORDER BY m.last_ts DESC`,
-  ).all();
-  const rows = results || [];
-  const targets = [];
-  const skipped = [];
-  for (const r of rows) {
-    const mid = r.machine_id;
-    const cb = (r.callback_url || "").trim();
-    const token = (r.token || "").trim();
-    if (!isValidCallbackUrl(cb)) {
-      skipped.push({ machine_id: mid, reason: "no_callback_url" });
-      continue;
-    }
-    if (!token) {
-      skipped.push({ machine_id: mid, reason: "no_token" });
-      continue;
-    }
-    targets.push({ machine_id: mid, callback_url: cb, token });
-  }
-
-  const resultsPush = [];
-  const concurrency = 10;
-  for (let i = 0; i < targets.length; i += concurrency) {
-    const chunk = targets.slice(i, i + concurrency);
-    const part = await Promise.all(chunk.map(async (t) => {
-      const r = await pushForceToCallback(t.callback_url, t.token, force_at);
-      return { machine_id: t.machine_id, ...r };
-    }));
-    resultsPush.push(...part);
-  }
-
-  const okN = resultsPush.filter((x) => x.ok).length;
-  const fail = resultsPush.filter((x) => !x.ok);
-  return {
-    ok: true,
-    force_at,
-    machines: rows.length,
-    pushed: resultsPush.length,
-    accepted: okN,
-    failed: fail.length,
-    skipped: skipped.length,
-    fail_detail: fail.slice(0, 20).map((x) => ({
-      machine_id: x.machine_id,
-      status: x.status,
-      error: x.body,
-    })),
-    skip_detail: skipped.slice(0, 20),
-    message: `已推送 ${okN}/${resultsPush.length} 台（跳过 ${skipped.length}，失败 ${fail.length}）；无公网/未登记 callback 的机器无法即时推送，请检查 cb_url 与防火墙`,
-  };
-}
-
 // ─── 生成一键命令 ───
+
+
+async function getVpsTokenFull(env, mid) {
+  if (!env.DB) return null;
+  const row = await env.DB.prepare(
+    `SELECT token FROM vps_tokens WHERE machine_id = ?`,
+  ).bind(mid).first();
+  return row ? row.token : null;
+}
+
+/** 轮换 VPS token（强制新密钥） */
+async function rotateVpsToken(env, mid) {
+  if (!env.DB) throw new Error(missingDbError(env));
+  await deleteVpsToken(env, mid);
+  return getOrCreateVpsToken(env, mid);
+}
+
+/** 删除机器：上报数据 + 历史 + token */
+async function deleteMachine(env, mid) {
+  if (!env.DB) throw new Error(missingDbError(env));
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM snapshots WHERE machine_id = ?`).bind(mid),
+    env.DB.prepare(`DELETE FROM machines WHERE machine_id = ?`).bind(mid),
+    env.DB.prepare(`DELETE FROM vps_tokens WHERE machine_id = ?`).bind(mid),
+  ]);
+}
+
+function buildInstallCommand(mid, vpsToken, cf_url, cf_time) {
+  const midQ = bashSingleQuote(mid);
+  const timeQ = bashSingleQuote(cf_time || "0 * * * *");
+  return [
+    "m_id='" + midQ + "' \\",
+    "cf_token='" + vpsToken + "' \\",
+    "cf_url='" + cf_url + "' \\",
+    "cf_time='" + timeQ + "' \\",
+    "  bash <(curl -fsSL 'https://raw.githubusercontent.com/wuyou18075/tg/refs/heads/main/sum.sh')",
+  ].join("\n");
+}
 
 async function generateCommand(env, request, rawMid) {
   const mid = String(rawMid || "").trim();
@@ -483,20 +344,105 @@ async function generateCommand(env, request, rawMid) {
   }
   const url = new URL(request.url);
   const cf_url = url.origin + "/api/report";
-
-  // 命令不含 t_token/t_id — VPS 只上报 CF，TG 从看板汇总
-  const midQ = bashSingleQuote(mid);
-  const cmd = `m_id='${midQ}' \\
-cf_token='${vpsToken}' \\
-cf_url='${cf_url}' \\
-cf_time='${cf_time}' \\
-  bash <(curl -fsSL 'https://raw.githubusercontent.com/wuyou18075/tg/refs/heads/main/sum.sh')`;
+  const cmd = buildInstallCommand(mid, vpsToken, cf_url, cf_time);
 
   return {
     ok: true,
     command: cmd,
     machine_id: mid,
     token: vpsToken.slice(0, 8) + "...", // 只展示前缀
+  };
+}
+
+
+/**
+ * 更新注册：复用/编辑参数后生成安装升级命令
+ * body: { machine_id, cf_token?, cf_url?, cf_time?, rotate_token? }
+ */
+async function generateUpdateCommand(env, request, body) {
+  const mid = String((body && body.machine_id) || "").trim();
+  if (!isValidMachineId(mid)) {
+    return {
+      ok: false,
+      error: "机器 ID 应为 1-64 字，支持中英文、数字及 ._-:（如 香港-1 / hk-1），不要空格",
+    };
+  }
+  if (!env.DB) return { ok: false, error: missingDbError(env) };
+
+  const cfg = await getConfig(env);
+  let cf_time = String((body && body.cf_time) || cfg.cf_time || "0 * * * *").trim() || "0 * * * *";
+  if (!/^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/.test(cf_time)) {
+    return { ok: false, error: "cf_time 应为 5 段 cron，如 0 * * * *" };
+  }
+
+  const url = new URL(request.url);
+  let cf_url = String((body && body.cf_url) || (url.origin + "/api/report")).trim();
+  if (!cf_url.startsWith("https://") || cf_url.includes(" ")) {
+    return { ok: false, error: "cf_url 应为 https:// 开头" };
+  }
+
+  let vpsToken;
+  try {
+    if (body && body.rotate_token) {
+      vpsToken = await rotateVpsToken(env, mid);
+    } else {
+      const provided = String((body && body.cf_token) || "").trim();
+      const existing = await getVpsTokenFull(env, mid);
+      if (provided) {
+        if (!/^[A-Za-z0-9._~+/-]{8,256}$/.test(provided)) {
+          return { ok: false, error: "cf_token 格式无效" };
+        }
+        const now = Math.floor(Date.now() / 1000);
+        await env.DB.prepare(
+          `INSERT INTO vps_tokens (machine_id, token, created_at) VALUES (?, ?, ?)
+           ON CONFLICT(machine_id) DO UPDATE SET token=excluded.token`,
+        ).bind(mid, provided, now).run();
+        vpsToken = provided;
+      } else if (existing) {
+        vpsToken = existing;
+      } else {
+        vpsToken = await getOrCreateVpsToken(env, mid);
+      }
+    }
+  } catch (e) {
+    return { ok: false, error: "生成失败：" + (e && e.message ? e.message : String(e)) };
+  }
+
+  const cmd = buildInstallCommand(mid, vpsToken, cf_url, cf_time);
+  return {
+    ok: true,
+    command: cmd,
+    machine_id: mid,
+    cf_url,
+    cf_time,
+    token: vpsToken,
+    token_preview: vpsToken.slice(0, 8) + "...",
+  };
+}
+
+/** 看板「更新注册」弹窗预填 */
+async function getMachineReg(env, request, mid) {
+  if (!isValidMachineId(mid)) {
+    return { ok: false, error: "机器 ID 无效" };
+  }
+  if (!env.DB) return { ok: false, error: missingDbError(env) };
+  const row = await env.DB.prepare(
+    `SELECT machine_id, hostname, interface, last_ts FROM machines WHERE machine_id = ?`,
+  ).bind(mid).first();
+  const cfg = await getConfig(env);
+  const url = new URL(request.url);
+  let token = await getVpsTokenFull(env, mid);
+  if (!token) token = await getOrCreateVpsToken(env, mid);
+  return {
+    ok: true,
+    machine_id: mid,
+    hostname: (row && row.hostname) || "",
+    interface: (row && row.interface) || "",
+    last_ts: (row && row.last_ts) || 0,
+    exists: !!row,
+    cf_token: token,
+    cf_url: url.origin + "/api/report",
+    cf_time: cfg.cf_time || "0 * * * *",
   };
 }
 
@@ -646,6 +592,11 @@ tr{cursor:pointer}
 tr.active{background:#1a2740}
 .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;background:#1e3a5f;color:#93c5fd}
 .badge.off{background:#3f1d1d;color:#fca5a5}
+button.sm{padding:4px 8px;font-size:12px;border-radius:6px}
+button.danger{background:#b91c1c;border-color:#b91c1c;color:#fff}
+button.danger:hover{background:#991b1b}
+td.ops{white-space:nowrap}
+td.ops button{margin-right:4px}
 .settings-form{max-width:520px}
 .settings-form label{display:block;font-size:12px;color:#9fb3d9;margin:14px 0 4px}
 .settings-form input{width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid #33415f;background:#0b1220;color:#e8eefc;outline:none}
@@ -696,7 +647,6 @@ tr.active{background:#1a2740}
         <option value="720">30 天</option>
       </select>
       <button onclick="refresh()">刷新</button>
-      <button class="green" onclick="forceFetchAll()" id="btnForceFetch" title="签名推送到各 VPS 回调口，立即上报（需公网 callback）">获取流量</button>
       <span id="tgSumStatus" class="muted" style="font-size:12px;margin-left:4px"></span>
     </div>
     <div class="cards" id="summary"></div>
@@ -710,9 +660,9 @@ tr.active{background:#1a2740}
         <table>
           <thead><tr>
             <th>机器</th><th>主机</th><th>网卡</th>
-            <th>今日入/出</th><th>本月入/出</th><th>最后上报</th><th>状态</th>
+            <th>今日入/出</th><th>本月入/出</th><th>最后上报</th><th>状态</th><th>操作</th>
           </tr></thead>
-          <tbody id="tbody"><tr><td colspan="7">加载中…</td></tr></tbody>
+          <tbody id="tbody"><tr><td colspan="8">加载中…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -775,6 +725,38 @@ tr.active{background:#1a2740}
 </div>
 
 <!-- Toast -->
+
+<!-- 更新注册弹窗 -->
+<div class="modal-overlay" id="modalUpdate">
+  <div class="modal">
+    <h2>更新注册</h2>
+    <p class="desc">复用该机器已有参数（可编辑）。确定后生成升级/重装命令，在 VPS 上执行即可更新脚本。</p>
+    <label for="upMid">机器 ID</label>
+    <input id="upMid" type="text" autocomplete="off">
+    <label for="upToken">cf_token（注册密钥）</label>
+    <input id="upToken" type="text" autocomplete="off" spellcheck="false">
+    <label for="upUrl">cf_url</label>
+    <input id="upUrl" type="text" autocomplete="off" spellcheck="false">
+    <label for="upTime">cf_time（cron）</label>
+    <input id="upTime" type="text" placeholder="0 * * * *" autocomplete="off">
+    <label style="display:flex;align-items:center;gap:8px;margin:10px 0;cursor:pointer">
+      <input id="upRotate" type="checkbox" style="width:auto;margin:0"> 轮换新密钥（旧 token 立即失效）
+    </label>
+    <div id="upCmdRegion" style="display:none">
+      <div class="cmd-ok" id="upOk"></div>
+      <div class="cmd-box" id="upCmd"></div>
+      <div class="btn-row">
+        <button class="green" onclick="copyUpCmd()">复制命令</button>
+        <button onclick="closeUpdateVps()">关闭</button>
+      </div>
+    </div>
+    <div class="btn-row" id="upBtnRegion">
+      <button class="green" onclick="confirmUpdateVps()">确定并生成命令</button>
+      <button onclick="closeUpdateVps()">取消</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -834,18 +816,36 @@ function renderSummary() {
 
 function renderTable() {
   const tb = document.getElementById("tbody");
-  if (!machines.length) { tb.innerHTML = '<tr><td colspan="7">暂无数据</td></tr>'; return; }
+  if (!machines.length) { tb.innerHTML = '<tr><td colspan="8">暂无数据</td></tr>'; return; }
   tb.innerHTML = machines.map(m => {
     const active = m.machine_id === selected ? "active" : "";
     const st = online(m.ts) ? '<span class="badge">在线</span>' : '<span class="badge off">离线</span>';
-    return '<tr class="' + active + '" data-mid="' + esc(m.machine_id||"") + '">' +
+    const midAttr = esc(m.machine_id||"");
+    const ops = '<td class="ops">' +
+      '<button type="button" class="sm primary" data-act="update" data-mid="' + midAttr + '">更新注册</button>' +
+      '<button type="button" class="sm danger" data-act="del" data-mid="' + midAttr + '">删除</button>' +
+      "</td>";
+    return '<tr class="' + active + '" data-mid="' + midAttr + '">' +
       "<td>" + esc(m.machine_id||"") + '</td><td>' + esc(m.hostname||"") + '</td><td>' + esc(m.interface||"") + "</td>" +
       "<td>" + gb(m.today?.rx) + " / " + gb(m.today?.tx) + "</td>" +
       "<td>" + gb(m.month?.rx) + " / " + gb(m.month?.tx) + "</td>" +
-      "<td>" + fmtTime(m.ts) + "</td><td>" + st + "</td></tr>";
+      "<td>" + fmtTime(m.ts) + "</td><td>" + st + "</td>" + ops + "</tr>";
   }).join("");
   tb.querySelectorAll("tr[data-mid]").forEach(tr => {
-    tr.addEventListener("click", () => { selected = tr.dataset.mid; renderTable(); loadHistory(); });
+    tr.addEventListener("click", (e) => {
+      if (e.target.closest("button")) return;
+      selected = tr.dataset.mid;
+      renderTable();
+      loadHistory();
+    });
+  });
+  tb.querySelectorAll("button[data-act]").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const mid = btn.dataset.mid;
+      if (btn.dataset.act === "update") openUpdateVps(mid);
+      if (btn.dataset.act === "del") deleteMachineRow(mid);
+    });
   });
 }
 
@@ -915,43 +915,6 @@ async function sendTgSummary() {
   }
 }
 
-// ─── 获取流量（通知所有 VPS 立即上报） ───
-async function forceFetchAll() {
-  const btn = document.getElementById("btnForceFetch");
-  const st = document.getElementById("tgSumStatus");
-  btn.disabled = true;
-  const orig = btn.textContent;
-  btn.textContent = "通知中…";
-  st.textContent = "";
-  try {
-    const data = await api("/api/force-report", { method: "POST" });
-    if (!data || !data.ok) {
-      st.textContent = "✗ " + (data?.error || "失败");
-      toast("获取流量失败：" + (data?.error || "未知错误"));
-    } else {
-      const acc = data.accepted != null ? data.accepted : 0;
-      const push = data.pushed != null ? data.pushed : (data.machines || 0);
-      st.textContent = "✓ 推送成功 " + acc + "/" + push + "（跳过 " + (data.skipped || 0) + "）";
-      toast(data.message || ("已推送 " + acc + " 台"));
-      // 快速刷新几次（回调秒级）
-      let n = 0;
-      const tick = async () => {
-        n++;
-        await refresh();
-        if (n < 6) setTimeout(tick, 5000);
-      };
-      setTimeout(tick, 2000);
-    }
-  } catch (e) {
-    st.textContent = "✗ " + e.message;
-    toast("获取流量失败：" + e.message);
-  } finally {
-    btn.textContent = orig;
-    btn.disabled = false;
-    setTimeout(() => { if (st.textContent.startsWith("✓")) st.textContent = ""; }, 12000);
-  }
-}
-
 // ─── 设置 ───
 async function loadConfig() {
   const data = await api("/api/config");
@@ -994,6 +957,99 @@ async function saveConfig() {
   } finally {
     btn.textContent = orig;
     btn.disabled = false;
+  }
+}
+
+// ─── 更新注册 / 删除 ───
+async function openUpdateVps(mid) {
+  document.getElementById("modalUpdate").classList.add("open");
+  document.getElementById("upCmdRegion").style.display = "none";
+  document.getElementById("upBtnRegion").style.display = "flex";
+  document.getElementById("upMid").value = mid || "";
+  document.getElementById("upToken").value = "加载中…";
+  document.getElementById("upUrl").value = "";
+  document.getElementById("upTime").value = "";
+  document.getElementById("upRotate").checked = false;
+  try {
+    const data = await api("/api/machine-reg?mid=" + encodeURIComponent(mid));
+    if (!data || !data.ok) {
+      toast(data?.error || "加载注册信息失败");
+      closeUpdateVps();
+      return;
+    }
+    document.getElementById("upMid").value = data.machine_id || mid;
+    document.getElementById("upToken").value = data.cf_token || "";
+    document.getElementById("upUrl").value = data.cf_url || "";
+    document.getElementById("upTime").value = data.cf_time || "0 * * * *";
+  } catch (e) {
+    toast("加载失败：" + (e && e.message ? e.message : String(e)));
+    closeUpdateVps();
+  }
+}
+
+function closeUpdateVps() {
+  document.getElementById("modalUpdate").classList.remove("open");
+}
+
+async function confirmUpdateVps() {
+  const machine_id = document.getElementById("upMid").value.trim();
+  const cf_token = document.getElementById("upToken").value.trim();
+  const cf_url = document.getElementById("upUrl").value.trim();
+  const cf_time = document.getElementById("upTime").value.trim();
+  const rotate_token = document.getElementById("upRotate").checked;
+  if (!machine_id) { toast("请填写机器 ID"); return; }
+  const btn = document.querySelector("#upBtnRegion .green");
+  if (btn) { btn.disabled = true; btn.textContent = "生成中…"; }
+  try {
+    const data = await api("/api/generate-update", {
+      method: "POST",
+      body: JSON.stringify({ machine_id, cf_token, cf_url, cf_time, rotate_token }),
+    });
+    if (!data || !data.ok) {
+      toast(data?.error || "生成失败");
+      return;
+    }
+    document.getElementById("upOk").textContent = "✓ 更新命令已生成（密钥：" + (data.token_preview || "") + "）";
+    document.getElementById("upCmd").textContent = data.command;
+    document.getElementById("upToken").value = data.token || cf_token;
+    document.getElementById("upCmdRegion").style.display = "block";
+    document.getElementById("upBtnRegion").style.display = "none";
+    toast("命令已生成，复制到 VPS 执行即可升级脚本");
+  } catch (e) {
+    toast("生成失败：" + (e && e.message ? e.message : String(e)));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "确定并生成命令"; }
+  }
+}
+
+async function copyUpCmd() {
+  try {
+    await navigator.clipboard.writeText(document.getElementById("upCmd").textContent);
+    toast("已复制到剪贴板");
+  } catch {
+    const r = document.createRange();
+    r.selectNode(document.getElementById("upCmd"));
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(r);
+    document.execCommand("copy");
+    toast("已复制");
+  }
+}
+
+async function deleteMachineRow(mid) {
+  if (!mid) return;
+  if (!confirm("确定删除机器「" + mid + "」？\n将清除看板数据、历史曲线与注册密钥（不可恢复）。")) return;
+  try {
+    const data = await api("/api/machine?mid=" + encodeURIComponent(mid), { method: "DELETE" });
+    if (!data || !data.ok) {
+      toast(data?.error || "删除失败");
+      return;
+    }
+    toast("已删除 " + mid);
+    if (selected === mid) selected = null;
+    await refresh();
+  } catch (e) {
+    toast("删除失败：" + (e && e.message ? e.message : String(e)));
   }
 }
 
@@ -1050,6 +1106,9 @@ async function copyCmd() {
 
 document.getElementById("modalVps").addEventListener("click", e => {
   if (e.target === e.currentTarget) closeAddVps();
+});
+document.getElementById("modalUpdate").addEventListener("click", e => {
+  if (e.target === e.currentTarget) closeUpdateVps();
 });
 document.getElementById("vpsMid").addEventListener("keydown", e => {
   if (e.key === "Enter") genCmd();
@@ -1114,22 +1173,6 @@ export default {
       return new Response(null, { status: 302, headers: { Location: "/login", "Set-Cookie": sessionCookie("", 0) } });
     }
 
-    // GET /api/agent/pull — VPS 轮询是否需要立即上报（Bearer VPS token）
-    if (req.method === "GET" && url.pathname === "/api/agent/pull") {
-      if (!env.DB) return json({ ok: true, force_report: false });
-      const mid = String(req.headers.get("x-machine-id") || url.searchParams.get("mid") || "").trim();
-      if (!isValidMachineId(mid)) return json({ ok: false, error: "machine_id invalid" }, 400);
-      const token = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
-      const okGlobal = reportAuth(req, env);
-      if (!okGlobal) {
-        if (!token || !(await verifyVpsToken(env, mid, token))) {
-          return json({ ok: false, error: "unauthorized" }, 401);
-        }
-      }
-      const force_report = await agentShouldForceReport(env, mid);
-      return json({ ok: true, force_report, machine_id: mid });
-    }
-
     // 以下需登录
     if (!(await requireDash(req, env))) {
       if (url.pathname.startsWith("/api/")) return json({ ok: false, error: "unauthorized" }, 401);
@@ -1181,22 +1224,50 @@ export default {
       }
     }
 
+    // GET /api/machine-reg — 更新注册弹窗预填（含完整 token）
+    if (req.method === "GET" && url.pathname === "/api/machine-reg") {
+      const mid = String(url.searchParams.get("mid") || "").trim();
+      try {
+        if (!env.DB) return json({ ok: false, error: missingDbError(env) }, 500);
+        const result = await getMachineReg(env, req, mid);
+        if (!result.ok) return json(result, 400);
+        return json(result);
+      } catch (e) {
+        return json({ ok: false, error: String(e && e.message ? e.message : e) }, 500);
+      }
+    }
+
+    // POST /api/generate-update — 按可编辑参数生成升级命令
+    if (req.method === "POST" && url.pathname === "/api/generate-update") {
+      try {
+        if (!env.DB) return json({ ok: false, error: missingDbError(env) }, 500);
+        const body = await req.json();
+        const result = await generateUpdateCommand(env, req, body || {});
+        if (!result.ok) return json(result, 400);
+        return json(result);
+      } catch (e) {
+        return json({ ok: false, error: "生成异常：" + (e && e.message ? e.message : String(e)) }, 500);
+      }
+    }
+
+    // DELETE /api/machine — 删除机器数据与 token
+    if (req.method === "DELETE" && url.pathname === "/api/machine") {
+      const mid = String(url.searchParams.get("mid") || "").trim();
+      if (!isValidMachineId(mid)) return json({ ok: false, error: "mid invalid" }, 400);
+      try {
+        if (!env.DB) return json({ ok: false, error: missingDbError(env) }, 500);
+        await deleteMachine(env, mid);
+        return json({ ok: true, machine_id: mid });
+      } catch (e) {
+        return json({ ok: false, error: String(e && e.message ? e.message : e) }, 500);
+      }
+    }
+
     // POST /api/tg-summary — 发送 TG 汇总
     if (req.method === "POST" && url.pathname === "/api/tg-summary") {
       const result = await tgSummary(env);
       if (!result.ok) return json(result, 400);
       return json(result);
-    }
-
-    // POST /api/force-report — 看板「获取流量」：签名推送到各 VPS 回调 + 写 force 标记（poll 兜底）
-    if (req.method === "POST" && url.pathname === "/api/force-report") {
-      if (!env.DB) return json({ ok: false, error: missingDbError(env) }, 500);
-      try {
-        const result = await forceReportPushAll(env);
-        return json(result);
-      } catch (e) {
-        return json({ ok: false, error: String(e && e.message ? e.message : e) }, 500);
-      }
     }
 
     // GET / — 看板
