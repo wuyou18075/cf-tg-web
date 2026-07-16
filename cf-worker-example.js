@@ -1890,19 +1890,19 @@ html[data-theme="cyber"]{
   --rx-fill:rgba(34,211,238,.14); --tx-fill:rgba(232,121,249,.12);
   --grid:#16304f; --glow:rgba(34,211,238,.22); --header-glow:linear-gradient(90deg,rgba(34,211,238,.08),rgba(232,121,249,.08));
 }
-/* 炫酷黑：炭黑分层 + 冷钢青点缀，避免一片死黑 */
+/* 炫酷黑：哑光灰黑，少反光；冷钢青只作点缀 */
 html[data-theme="noir"]{
   color-scheme:dark;
-  --bg:#07080c; --bg2:#0c0e14; --panel:#12151d; --panel2:#0a0c12;
-  --line:#232833; --line2:#1a1e28; --border:#2e3545;
-  --text:#eef2f7; --muted:#9aa3b5; --label:#c4ccda;
-  --hover:#1a2030; --accent:#7dd3fc; --accent2:#38bdf8;
+  --bg:#0b0d11; --bg2:#10131a; --panel:#161a22; --panel2:#12151c;
+  --line:#2a303b; --line2:#222832; --border:#3a4252;
+  --text:#e8edf5; --muted:#9aa3b2; --label:#c5ccd8;
+  --hover:#1c2230; --accent:#5ec8f0; --accent2:#3db7e6;
   --ok:#34d399; --ok2:#10b981; --warn:#fbbf24; --danger:#f87171; --danger2:#ef4444;
-  --badge-bg:#172033; --badge-fg:#bae6fd; --badge-off-bg:#3a1518; --badge-off-fg:#fca5a5;
-  --rx:#7dd3fc; --tx:#a5b4fc; --rx-soft:rgba(125,211,252,.9); --tx-soft:rgba(165,180,252,.88);
-  --rx-fill:rgba(125,211,252,.14); --tx-fill:rgba(165,180,252,.12);
-  --grid:#1c2230; --glow:rgba(56,189,248,.12); --header-glow:linear-gradient(90deg,rgba(56,189,248,.10),rgba(165,180,252,.05),transparent 70%);
-  --body-bg:radial-gradient(900px 420px at 0% 0%, rgba(56,189,248,.10), transparent 55%), radial-gradient(700px 380px at 100% 0%, rgba(129,140,248,.08), transparent 50%), #07080c;
+  --badge-bg:#1b2433; --badge-fg:#b6e6fb; --badge-off-bg:#3a181b; --badge-off-fg:#fca5a5;
+  --rx:#5ec8f0; --tx:#8ea2f0; --rx-soft:rgba(94,200,240,.9); --tx-soft:rgba(142,162,240,.88);
+  --rx-fill:rgba(94,200,240,.13); --tx-fill:rgba(142,162,240,.11);
+  --grid:#252b36; --glow:rgba(0,0,0,.25); --header-glow:none;
+  --body-bg:linear-gradient(180deg,#0b0d11 0%,#0e1117 55%,#0b0d11 100%);
 }
 /* 透明玻璃：深空渐变底 + 毛玻璃面板 */
 html[data-theme="glass"]{
@@ -1962,49 +1962,114 @@ html[data-theme="glass"] .toast{
   -webkit-backdrop-filter: blur(var(--blur));
 }
 html[data-theme="glass"] header{background:rgba(10,16,36,.55)}
-html[data-theme="glass"] select,
-html[data-theme="glass"] button,
+/* 输入与普通按钮：半透明玻璃，但不要波及主题切换下拉 */
+html[data-theme="glass"] button:not(.primary):not(.green):not(.warn):not(.danger),
 html[data-theme="glass"] .settings-form input,
-html[data-theme="glass"] .settings-form select,
 html[data-theme="glass"] .settings-form textarea,
 html[data-theme="glass"] textarea,
 html[data-theme="glass"] .seg button,
 html[data-theme="glass"] .section-note,
 html[data-theme="glass"] .tpl-help,
-html[data-theme="glass"] .tpl-preview{
-  background:rgba(255,255,255,.06);
+html[data-theme="glass"] .tpl-preview,
+html[data-theme="glass"] .settings-form select:not(#themeSelect),
+html[data-theme="glass"] select:not(#themeSelect){
+  background:rgba(255,255,255,.07);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
+  border-color:rgba(255,255,255,.16);
+  color:var(--text);
 }
-html[data-theme="glass"] .seg button.active,
-html[data-theme="glass"] button.primary{background:rgba(56,189,248,.85);border-color:transparent;color:#041018}
-/* 下拉弹出层在系统原生控件里常是白底：强制选项深色字，避免“白底白字” */
-html[data-theme="glass"] select,
-html[data-theme="glass"] select option,
-html[data-theme="glass"] .settings-form select option,
-html[data-theme="glass"] .theme-switch select option{
-  color:#0b1220;
-  background:#f8fafc;
+/* 玻璃主题按钮配色 */
+html[data-theme="glass"] button.primary,
+html[data-theme="glass"] .seg button.active{
+  background:linear-gradient(180deg,#7dd3fc,#38bdf8);
+  border:1px solid rgba(186,230,253,.55);
+  color:#041018;
+  font-weight:700;
+  box-shadow:0 6px 18px rgba(56,189,248,.22);
 }
-html[data-theme="glass"] select{
+html[data-theme="glass"] button.primary:hover{
+  background:linear-gradient(180deg,#bae6fd,#38bdf8);
+  border-color:rgba(224,242,254,.7);
+}
+html[data-theme="glass"] button.green{
+  background:linear-gradient(180deg,#6ee7b7,#34d399);
+  border:1px solid rgba(167,243,208,.45);
+  color:#042f1a;
+  font-weight:700;
+}
+html[data-theme="glass"] button.warn{
+  background:linear-gradient(180deg,#fcd34d,#f59e0b);
+  border:1px solid rgba(253,230,138,.5);
+  color:#3b2503;
+  font-weight:700;
+}
+html[data-theme="glass"] button.danger{
+  background:linear-gradient(180deg,#fda4af,#fb7185);
+  border:1px solid rgba(254,205,211,.45);
+  color:#4c0519;
+  font-weight:700;
+}
+/* 普通下拉：深底浅字；选项层：浅底深字 */
+html[data-theme="glass"] select:not(#themeSelect),
+html[data-theme="glass"] .settings-form select:not(#themeSelect){
   color:#f4f7ff;
   background:rgba(8,14,32,.82);
   border-color:rgba(125,211,252,.35);
 }
-html[data-theme="glass"] select:focus{
-  background:rgba(8,14,32,.92);
+html[data-theme="glass"] select:not(#themeSelect) option,
+html[data-theme="glass"] .settings-form select:not(#themeSelect) option{
+  color:#0b1220;
+  background:#f8fafc;
 }
-/* 展开后 option 仍走系统浅色底，保持深字 */
-html[data-theme="glass"] select option:checked,
-html[data-theme="glass"] select option:hover{
+html[data-theme="glass"] select:not(#themeSelect) option:checked,
+html[data-theme="glass"] select:not(#themeSelect) option:hover{
   color:#041018;
   background:#bae6fd;
 }
+/* 主题切换下拉：不吃玻璃透明，固定深实心 */
+html[data-theme="glass"] #themeSelect,
+html[data-theme="glass"] .theme-switch select{
+  color:#eaf6ff !important;
+  background:#0b1428 !important;
+  border:1px solid #3b82f6 !important;
+  backdrop-filter:none !important;
+  -webkit-backdrop-filter:none !important;
+  box-shadow:none !important;
+}
+html[data-theme="glass"] #themeSelect option,
+html[data-theme="glass"] .theme-switch select option{
+  color:#0b1220 !important;
+  background:#f8fafc !important;
+}
 
+/* 炫酷黑：哑光灰黑表面 + 当前冷青按钮 */
 html[data-theme="noir"] button.primary,
-html[data-theme="noir"] .seg button.active{background:linear-gradient(180deg,#7dd3fc,#38bdf8);border-color:transparent;color:#041018;font-weight:700}
-html[data-theme="noir"] button.primary:hover{background:linear-gradient(180deg,#bae6fd,#38bdf8);border-color:transparent;color:#041018}
-html[data-theme="noir"] header{border-bottom-color:#232833;box-shadow:inset 0 -1px 0 rgba(125,211,252,.12)}
+html[data-theme="noir"] .seg button.active{
+  background:#5ec8f0;
+  border:1px solid #7dd3fc;
+  color:#041018;
+  font-weight:700;
+  box-shadow:none;
+}
+html[data-theme="noir"] button.primary:hover{background:#7dd3fc;border-color:#bae6fd;color:#041018}
+html[data-theme="noir"] button.green{background:#34d399;border-color:#6ee7b7;color:#042f1a;font-weight:700;box-shadow:none}
+html[data-theme="noir"] button.warn{background:#f59e0b;border-color:#fbbf24;color:#1f1403;font-weight:700;box-shadow:none}
+html[data-theme="noir"] button.danger{background:#f87171;border-color:#fca5a5;color:#2a0a0a;font-weight:700;box-shadow:none}
+html[data-theme="noir"] button:not(.primary):not(.green):not(.warn):not(.danger),
+html[data-theme="noir"] select,
+html[data-theme="noir"] .settings-form input,
+html[data-theme="noir"] .settings-form select,
+html[data-theme="noir"] .settings-form textarea,
+html[data-theme="noir"] textarea,
+html[data-theme="noir"] .seg button{
+  background:#151922;
+  border-color:#343b4a;
+  color:var(--text);
+  box-shadow:none;
+}
+html[data-theme="noir"] .seg button.active{background:#5ec8f0;border-color:#7dd3fc;color:#041018}
+html[data-theme="noir"] header{border-bottom-color:#2a303b;box-shadow:none}
 html[data-theme="noir"] .card .val{letter-spacing:.3px}
 html[data-theme="paper"] body,
 html[data-theme="paper"]{/* soft paper */}
@@ -2033,7 +2098,8 @@ html[data-theme="prairie"] .settings-card{
 html[data-theme="noir"] .card,
 html[data-theme="noir"] .panel,
 html[data-theme="noir"] .settings-card{
-  box-shadow:0 0 0 1px rgba(255,255,255,.03),0 12px 40px rgba(0,0,0,.45);
+  box-shadow:0 1px 0 rgba(255,255,255,.03),0 8px 20px rgba(0,0,0,.28);
+  background:#161a22;
 }
 html[data-theme="prairie"] button.primary{color:#fff}
 html[data-theme="prairie"] header{background:#d9e7d3;border-bottom-color:#b9cfb3}
@@ -2215,7 +2281,7 @@ textarea:focus{border-color:var(--accent)}
 .theme-opt .desc{font-size:11px;color:var(--muted);margin-top:2px;line-height:1.4}
 .theme-opt[data-id="default"]{--sw1:#0b1220;--sw2:#3b82f6;--sw3:#34d399}
 .theme-opt[data-id="cyber"]{--sw1:#070b14;--sw2:#22d3ee;--sw3:#e879f9}
-.theme-opt[data-id="noir"]{--sw1:#07080c;--sw2:#7dd3fc;--sw3:#2e3545}
+.theme-opt[data-id="noir"]{--sw1:#0b0d11;--sw2:#5ec8f0;--sw3:#2a303b}
 .theme-opt[data-id="glass"]{--sw1:#0a1024;--sw2:#7dd3fc;--sw3:#a5b4fc}
 .theme-opt[data-id="paper"]{--sw1:#e9edf5;--sw2:#4f46e5;--sw3:#0f766e}
 .theme-opt[data-id="prairie"]{--sw1:#e4efdf;--sw2:#2f6b3c;--sw3:#5a8f5f}
@@ -3465,7 +3531,7 @@ async function sendTgSummary() {
 const THEMES = [
   { id:"default", name:"默认", desc:"经典深蓝控制台" },
   { id:"cyber", name:"赛博霓虹", desc:"青 + 品红霓虹" },
-  { id:"noir", name:"炫酷黑", desc:"炭黑分层 + 冷钢青" },
+  { id:"noir", name:"炫酷黑", desc:"哑光灰黑 + 冷青按钮" },
   { id:"glass", name:"透明玻璃", desc:"深空底 + 毛玻璃" },
   { id:"paper", name:"优雅白", desc:"雾灰纸感，柔和不刺眼" },
   { id:"prairie", name:"草原绿", desc:"实叶绿分层，中层不发白" },
