@@ -190,6 +190,27 @@ cf_time='0 * * * *' \
 
 ---
 
+## 排查「获取流量」失败
+
+结果弹窗「说明」列会写具体原因。常见：
+
+| 说明关键词 | 处理 |
+|-----------|------|
+| CF 1003 / 直连 IP | 确认已部署含 TCP sockets 的最新 Worker |
+| 建连失败 / 超时 | VPS 放行回调端口（默认 **19840**）；`systemctl status traffic-telegram-report-cb` |
+| 无 HTTP 响应 | 端口被其它进程占用，或回调服务未正常监听 |
+| 401 / 鉴权 | 看板 token 与 VPS 上 token 不一致 → **更新注册** 后重装 |
+| no_callback_url | 机器未登记回调 → 用含 `cf_url` 的安装命令重装/更新 |
+
+在 VPS 本机自测回调：
+
+```bash
+# 看监听
+ss -lntp | grep 19840
+# 看服务日志
+journalctl -u traffic-telegram-report-cb.service -n 50 --no-pager
+```
+
 ## Agent 运维
 
 ```bash

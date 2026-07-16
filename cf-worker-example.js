@@ -16,6 +16,8 @@
  *   5. 再部署一次使绑定生效
  */
 
+import { connect as cfTcpConnect } from "cloudflare:sockets";
+
 const SESSION_TTL = 60 * 60 * 24 * 7;
 const COOKIE_NAME = "dash_session";
 
@@ -659,63 +661,104 @@ async function agentShouldForceReport(env, mid) {
  */
 function isIpHostname(host) {
   const h = String(host || "").replace(/^\[|\]$/g, "");
-  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(h)) return true;
-  if (h.includes(":")) return true; // 粗判 IPv6
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(h)) {
+    const parts = h.split(".").map(Number);
+    return parts.length === 4 && parts.every((n) => n >= 0 && n <= 255);
+  }
+  // IPv6（含压缩形式）
+  if (h.includes(":")) return true;
   return false;
 }
 
 /**
- * 经 TCP Socket 发送裸 HTTP/1.1 POST（绕过 fetch 禁止直连 IP 的 1003）
- * 仅用于 http://IP:port/... 回调；https IP 不支持（无 TLS 握手）
+ * 错误对象 → 可读字符串（避免空 message）
  */
-async function httpPostViaTcpSocket(urlStr, headerMap, bodyStr, timeoutMs = 8000) {
+function errText(e) {
+  if (e == null) return "unknown error";
+  if (typeof e === "string") return e;
+  const parts = [];
+  if (e.name) parts.push(e.name);
+  if (e.message) parts.push(e.message);
+  if (e.cause) parts.push("cause=" + errText(e.cause));
+  if (!parts.length) {
+    try { return String(e); } catch { return "error"; }
+  }
+  return parts.join(": ");
+}
+
+/**
+ * 经 TCP Socket 发送裸 HTTP/1.1 POST（绕过 fetch 禁止直连 IP 的 1003）
+ * 仅用于 http://IP:port/... 回调
+ */
+async function httpPostViaTcpSocket(urlStr, headerMap, bodyStr, timeoutMs = 10000) {
   const u = new URL(urlStr);
   if (u.protocol !== "http:") {
-    throw new Error("IP 回调仅支持 http://（Workers 无法对 IP 做 fetch/TLS）");
+    return {
+      ok: false,
+      status: 0,
+      body: "IP 回调仅支持 http://，当前为 " + u.protocol + "（Worker 无法对裸 IP 做 HTTPS）",
+    };
   }
   const hostname = u.hostname.replace(/^\[|\]$/g, "");
   const port = Number(u.port) || 80;
   const path = (u.pathname || "/") + (u.search || "");
   const body = bodyStr || "";
-  const hostHeader = u.host; // 含端口
+  const hostHeader = u.host;
+  const target = hostname + ":" + port + path;
 
-  let connect;
-  try {
-    ({ connect } = await import("cloudflare:sockets"));
-  } catch (e) {
-    throw new Error("当前 Worker 不支持 cloudflare:sockets，无法直连 IP。请改用域名 cb_url，或确认套餐支持 TCP sockets");
+  if (typeof cfTcpConnect !== "function") {
+    return {
+      ok: false,
+      status: 0,
+      body: "cfTcpConnect 不可用：请确认 Worker 已部署含 cloudflare:sockets 的版本",
+    };
   }
 
-  const socket = connect({ hostname, port });
-  // 等待 TCP 建连（失败会 reject）
-  if (socket.opened) await socket.opened;
   const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
-
-  const lines = [
+  const bodyBytes = encoder.encode(body);
+  const headerLines = [
     "POST " + path + " HTTP/1.1",
     "Host: " + hostHeader,
     "Connection: close",
     "Content-Type: " + (headerMap["Content-Type"] || "application/json"),
-    "Content-Length: " + encoder.encode(body).byteLength,
+    "Content-Length: " + String(bodyBytes.byteLength),
   ];
   for (const [k, v] of Object.entries(headerMap)) {
     if (/^content-type$/i.test(k) || /^content-length$/i.test(k) || /^host$/i.test(k)) continue;
-    lines.push(k + ": " + v);
+    headerLines.push(k + ": " + v);
   }
-  const req = lines.join("\r\n") + "\r\n\r\n" + body;
+  const headBytes = encoder.encode(headerLines.join("\r\n") + "\r\n\r\n");
+
+  let socket;
+  try {
+    socket = cfTcpConnect({ hostname, port });
+  } catch (e) {
+    return { ok: false, status: 0, body: "TCP connect() 失败 → " + target + " · " + errText(e) };
+  }
 
   let timer;
   const timeoutPromise = new Promise((_, rej) => {
-    timer = setTimeout(() => rej(new Error("TCP 连接/读取超时 " + timeoutMs + "ms")), timeoutMs);
+    timer = setTimeout(() => rej(new Error("超时 " + timeoutMs + "ms → " + target + "（检查防火墙是否放行 " + port + "）")), timeoutMs);
   });
 
   const work = (async () => {
+    // 等建连
+    if (socket.opened) {
+      try {
+        await socket.opened;
+      } catch (e) {
+        throw new Error("TCP 建连失败 → " + target + " · " + errText(e) + "（VPS 未监听/防火墙拦截/IP 错误）");
+      }
+    }
+
     const writer = socket.writable.getWriter();
     try {
-      await writer.write(encoder.encode(req));
+      await writer.write(headBytes);
+      if (bodyBytes.byteLength) await writer.write(bodyBytes);
+    } catch (e) {
+      throw new Error("TCP 写入失败 → " + target + " · " + errText(e));
     } finally {
-      try { await writer.close(); } catch { /* ignore */ }
+      try { await writer.close(); } catch { /* half-close OK */ }
     }
 
     const reader = socket.readable.getReader();
@@ -731,26 +774,51 @@ async function httpPostViaTcpSocket(urlStr, headerMap, bodyStr, timeoutMs = 8000
           if (total > 65536) break;
         }
       }
+    } catch (e) {
+      throw new Error("TCP 读取失败 → " + target + " · " + errText(e));
     } finally {
       try { reader.releaseLock(); } catch { /* ignore */ }
       try { socket.close(); } catch { /* ignore */ }
     }
 
+    if (!total) {
+      return {
+        ok: false,
+        status: 0,
+        body: "TCP 已连接但无 HTTP 响应 → " + target + "（端口通但非回调服务，或服务未处理 POST）",
+      };
+    }
+
+    const decoder = new TextDecoder();
     let raw = "";
     for (const c of chunks) raw += decoder.decode(c, { stream: true });
     raw += decoder.decode();
 
     const sep = raw.indexOf("\r\n\r\n");
-    const head = sep >= 0 ? raw.slice(0, sep) : raw;
+    const head = sep >= 0 ? raw.slice(0, sep) : raw.slice(0, 200);
     const respBody = sep >= 0 ? raw.slice(sep + 4) : "";
-    const statusLine = head.split("\r\n")[0] || "";
-    const m = /^HTTP\/\d\.\d\s+(\d{3})/i.exec(statusLine);
-    const status = m ? Number(m[1]) : 0;
-    return { ok: status >= 200 && status < 300, status, body: respBody.slice(0, 200) };
+    const statusLine = (head.split("\r\n")[0] || "").trim();
+    const m = /^HTTP\/\d(?:\.\d)?\s+(\d{3})/i.exec(statusLine);
+    if (!m) {
+      return {
+        ok: false,
+        status: 0,
+        body: "非 HTTP 响应 → " + target + " · " + statusLine.slice(0, 80),
+      };
+    }
+    const status = Number(m[1]);
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      body: (respBody || statusLine).slice(0, 200),
+    };
   })();
 
   try {
     return await Promise.race([work, timeoutPromise]);
+  } catch (e) {
+    try { socket.close(); } catch { /* ignore */ }
+    return { ok: false, status: 0, body: errText(e).slice(0, 240) };
   } finally {
     clearTimeout(timer);
   }
@@ -759,7 +827,7 @@ async function httpPostViaTcpSocket(urlStr, headerMap, bodyStr, timeoutMs = 8000
 /**
  * 向单台 VPS 回调口发送签名请求（Bearer + HMAC + 时间窗）
  * - 域名：fetch
- * - 裸 IP：TCP sockets 发 HTTP（避免 CF Error 1003 Direct IP access not allowed）
+ * - 裸 IP：TCP sockets 发 HTTP（避免 CF Error 1003）
  */
 async function pushForceToCallback(callbackUrl, token, forceAt) {
   const bodyObj = { cmd: "force_report", at: forceAt };
@@ -779,21 +847,22 @@ async function pushForceToCallback(callbackUrl, token, forceAt) {
   try {
     urlObj = new URL(callbackUrl);
   } catch {
-    return { ok: false, status: 0, body: "invalid callback_url" };
+    return { ok: false, status: 0, body: "callback_url 非法: " + String(callbackUrl).slice(0, 80) };
   }
 
-  // 裸 IP：禁止用 fetch（1003），改走 TCP
   if (isIpHostname(urlObj.hostname)) {
-    try {
-      return await httpPostViaTcpSocket(callbackUrl, headers, body, 8000);
-    } catch (e) {
-      const msg = String(e && e.message ? e.message : e);
-      return { ok: false, status: 0, body: msg.slice(0, 200) };
+    const r = await httpPostViaTcpSocket(callbackUrl, headers, body, 10000);
+    // 保证 detail 非空
+    if (!r.body) {
+      r.body = r.ok
+        ? "OK"
+        : ("推送失败 status=" + r.status + " → " + urlObj.host + urlObj.pathname);
     }
+    return r;
   }
 
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 8000);
+  const timer = setTimeout(() => ctrl.abort(), 10000);
   try {
     const res = await fetch(callbackUrl, {
       method: "POST",
@@ -802,17 +871,24 @@ async function pushForceToCallback(callbackUrl, token, forceAt) {
       signal: ctrl.signal,
     });
     const textBody = await res.text().catch(() => "");
-    // 若仍撞上 1003，给出可读说明
     if (res.status === 403 && /1003/.test(textBody)) {
       return {
         ok: false,
         status: 403,
-        body: "CF 1003：禁止直连 IP。请确认 callback 为域名，或 Worker 已用 TCP sockets 推送 IP",
+        body: "CF 1003 禁止 fetch 直连 IP。callback=" + urlObj.host + " 应走 TCP sockets 路径",
       };
     }
-    return { ok: res.ok, status: res.status, body: textBody.slice(0, 200) };
+    return {
+      ok: res.ok,
+      status: res.status,
+      body: (textBody || ("HTTP " + res.status)).slice(0, 200),
+    };
   } catch (e) {
-    return { ok: false, status: 0, body: String(e && e.message ? e.message : e) };
+    return {
+      ok: false,
+      status: 0,
+      body: "fetch 失败 → " + urlObj.host + " · " + errText(e),
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -853,7 +929,7 @@ async function forceReportPushAll(env) {
     const chunk = targets.slice(i, i + concurrency);
     const part = await Promise.all(chunk.map(async (t) => {
       const r = await pushForceToCallback(t.callback_url, t.token, force_at);
-      return { machine_id: t.machine_id, ...r };
+      return { machine_id: t.machine_id, callback_url: t.callback_url, ...r };
     }));
     resultsPush.push(...part);
   }
@@ -864,8 +940,9 @@ async function forceReportPushAll(env) {
     ...resultsPush.map((x) => ({
       machine_id: x.machine_id,
       state: x.ok ? "pushed" : "push_fail",
-      status: x.status,
-      detail: (x.body || "").slice(0, 200),
+      status: x.status == null ? 0 : x.status,
+      detail: String(x.body || (x.ok ? "OK" : "无错误详情")).slice(0, 240),
+      callback_url: x.callback_url || "",
     })),
     ...skipped.map((x) => ({
       machine_id: x.machine_id,
@@ -1729,17 +1806,27 @@ let forceTrack = null; // { force_at, rows:[{machine_id,state,status,detail,repo
 function reasonLabel(state, detail, status) {
   if (state === "pushed") return "回调已接受";
   if (state === "push_fail") {
-    const d = String(detail || "");
+    const d = String(detail || "").trim();
+    if (!d) return "推送失败（无详情，status=" + (status || 0) + "）";
     if (/1003|Direct IP|直连 IP|禁止直连/i.test(d)) {
-      return "CF 禁止 fetch 直连 IP(1003)；已改 TCP 推送，若仍失败请查防火墙/端口或改用域名 cb_url";
+      return "CF 1003：fetch 不能直连 IP。应走 TCP；若仍见此文请确认已部署最新 Worker";
     }
-    if (/sockets|cloudflare:sockets/i.test(d)) {
-      return "Worker 不支持 TCP sockets，请设置域名形式的 cb_url";
+    if (/cfTcpConnect 不可用|sockets/i.test(d)) {
+      return d.slice(0, 160);
     }
-    if (/abort|Timeout|timeout|超时/i.test(d)) return "超时（VPS 无响应/防火墙未放行回调端口）";
-    if (/Failed to fetch|NetworkError|fetch failed|ECONNREFUSED|connection/i.test(d)) return "网络不可达（检查公网 IP 与端口）";
-    if (detail) return (status ? ("HTTP " + status + " ") : "") + d.slice(0, 120);
-    return "推送失败";
+    if (/建连失败|connect\(\) 失败|ECONNREFUSED|Connection refused/i.test(d)) {
+      return "连不上回调口 · " + d.slice(0, 140);
+    }
+    if (/超时|Timeout|timeout|abort/i.test(d)) {
+      return "超时 · " + d.slice(0, 140);
+    }
+    if (/无 HTTP 响应|非 HTTP/i.test(d)) {
+      return d.slice(0, 160);
+    }
+    if (/401|403|签名|sig|auth/i.test(d) && status) {
+      return "HTTP " + status + " 鉴权/拒绝 · " + d.slice(0, 100);
+    }
+    return (status ? ("HTTP " + status + " · ") : "") + d.slice(0, 160);
   }
   if (state === "skipped") {
     if (detail === "no_callback_url") return "未登记回调地址（需重装/更新注册）";
@@ -1758,6 +1845,7 @@ function openForceResult(data) {
     state: x.state || (x.ok ? "pushed" : "push_fail"),
     status: x.status || 0,
     detail: x.detail || x.error || x.reason || "",
+    callback_url: x.callback_url || "",
     reported: false,
     abandoned: false,
     last_ts: 0,
@@ -1825,6 +1913,7 @@ function renderForceResult() {
     let tip = reasonLabel(r.state, r.detail, r.status);
     if (r.abandoned) tip = "超过 30 秒未上报，已停止等待";
     if (r.reported && r.last_ts) tip += " · 上报时间 " + fmtTime(r.last_ts);
+    if (r.state === "push_fail" && r.callback_url) tip += " · " + r.callback_url;
     td4.textContent = tip;
     td4.style.color = "#9fb3d9";
     tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3); tr.appendChild(td4);
