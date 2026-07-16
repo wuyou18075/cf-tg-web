@@ -1191,6 +1191,98 @@ async function forceReportPushAll(env) {
 }
 
 
+// ─── TG 汇总模板 ───
+
+const BUILTIN_TEMPLATES = [
+  {
+    id: "simple", name: "简洁日报", builtin: true,
+    body: "📊 流量汇总\n时间：{time}\n主机：{host_count} 台（在线 {online_count}）\n今日：入 {today_rx} / 出 {today_tx} / 合 {today_total}\n本月：入 {month_rx} / 出 {month_tx} / 合 {month_total}\n━━━━━━━━━━━━\n{machine_lines}",
+    machine_line: "{status} {m_id}  入{today_rx}/出{today_tx}  月{month_rx}/{month_tx}",
+  },
+  {
+    id: "detailed", name: "详细日报", builtin: true,
+    body: "📊 流量详细日报\n━━━━━━━━━━━━\n时间：{time}\n主机数：{host_count}（在线 {online_count}）\n\n【今日】入 {today_rx} / 出 {today_tx} / 合计 {today_total}\n【本月】入 {month_rx} / 出 {month_tx} / 合计 {month_total}\n━━━━━━━━━━━━\n各机明细：\n{machine_lines}",
+    machine_line: "{status} {m_id}({hostname}) 今日 入{today_rx} 出{today_tx} | 本月 入{month_rx} 出{month_tx}",
+  },
+];
+
+async function getConfigValue(env, key) {
+  if (!env.DB) return null;
+  try {
+    const r = await env.DB.prepare(`SELECT value FROM config WHERE key = ?`).bind(key).first();
+    return r ? r.value : null;
+  } catch { return null; }
+}
+
+async function setConfigValue(env, key, value) {
+  if (!env.DB) throw new Error(missingDbError(env));
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.prepare(
+    `INSERT INTO config (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+  ).bind(key, value, now).run();
+}
+
+/** 读取所有模板（首次自动写入内置）；active 默认 simple */
+async function getTemplates(env) {
+  let raw = await getConfigValue(env, "tg_templates");
+  let arr = null;
+  if (raw) { try { arr = JSON.parse(raw); } catch {} }
+  if (!Array.isArray(arr) || !arr.length) {
+    arr = BUILTIN_TEMPLATES.map(x => ({ ...x }));
+    await setConfigValue(env, "tg_templates", JSON.stringify(arr));
+  }
+  const active = (await getConfigValue(env, "tg_active")) || "simple";
+  return { templates: arr, active };
+}
+
+async function saveTemplates(env, templates, active) {
+  if (!Array.isArray(templates)) return { ok: false, error: "templates 应为数组" };
+  const clean = templates.filter(x => x && typeof x === "object").map(x => ({
+    id: String(x.id || "").trim() || ("tpl_" + Math.random().toString(36).slice(2, 8)),
+    name: String(x.name || "未命名").slice(0, 40),
+    builtin: !!x.builtin,
+    body: String(x.body || "").slice(0, 4000),
+    machine_line: String(x.machine_line || "").slice(0, 500),
+  }));
+  await setConfigValue(env, "tg_templates", JSON.stringify(clean));
+  if (active) await setConfigValue(env, "tg_active", String(active));
+  return { ok: true, templates: clean, active: active || (await getConfigValue(env, "tg_active")) || "simple" };
+}
+
+/** 渲染模板为 TG 消息文本 */
+function renderTemplate(tpl, machines, totals) {
+  const time = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+  const onlineCount = machines.filter(m => m.ts && (Date.now() / 1000 - m.ts) < 7200).length;
+  const fillGlobal = (s) => String(s || "")
+    .split("{time}").join(time)
+    .split("{host_count}").join(String(machines.length))
+    .split("{online_count}").join(String(onlineCount))
+    .split("{today_rx}").join(gb(totals.today_rx))
+    .split("{today_tx}").join(gb(totals.today_tx))
+    .split("{today_total}").join(gb(totals.today_rx + totals.today_tx))
+    .split("{month_rx}").join(gb(totals.month_rx))
+    .split("{month_tx}").join(gb(totals.month_tx))
+    .split("{month_total}").join(gb(totals.month_rx + totals.month_tx));
+  const shown = machines.slice(0, 20);
+  const lines = shown.map(m => {
+    const isOn = m.ts && (Date.now() / 1000 - m.ts) < 7200;
+    const ln = String((tpl && tpl.machine_line) || "{status} {m_id}")
+      .split("{status}").join(isOn ? "●" : "○")
+      .split("{m_id}").join(m.machine_id || "?")
+      .split("{hostname}").join(m.hostname || "")
+      .split("{iface}").join(m.interface || "")
+      .split("{today_rx}").join(gb(m.today && m.today.rx))
+      .split("{today_tx}").join(gb(m.today && m.today.tx))
+      .split("{month_rx}").join(gb(m.month && m.month.rx))
+      .split("{month_tx}").join(gb(m.month && m.month.tx));
+    return ln;
+  });
+  const more = machines.length > 20 ? ("\n...及其他 " + (machines.length - 20) + " 台") : "";
+  return fillGlobal((tpl && tpl.body) || "")
+    .split("{machine_lines}").join(lines.join("\n") + more);
+}
+
 // ─── TG 汇总 ───
 
 async function tgSummary(env) {
@@ -1223,25 +1315,10 @@ async function tgSummary(env) {
   const now = new Date();
   const dateStr = now.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
 
-  // 每台机器单行
-  const lines = machines.slice(0, 20).map(m => {
-    const online = m.ts && (Date.now() / 1000 - m.ts) < 7200 ? "●" : "○";
-    const t = m.today || {};
-    const mo = m.month || {};
-    return `${online} ${m.machine_id || "?"}  入${gb(t.rx)}/出${gb(t.tx)}  月${gb(mo.rx)}/出${gb(mo.tx)}`;
-  }).join("\n");
-
-  const more = machines.length > 20 ? `\n...及其他 ${machines.length - 20} 台` : "";
-
-  const msg = `📊 流量汇总
-━━━━━━━━━━━━━━━━━━━━
-主机数：${machines.length} 台（参与 TG，在线 ${total.online}）
-时间：${dateStr}
-
-今日总计：入 ${gb(total.today_rx)} / 出 ${gb(total.today_tx)} / 合计 ${gb(total.today_rx + total.today_tx)}
-本月总计：入 ${gb(total.month_rx)} / 出 ${gb(total.month_tx)} / 合计 ${gb(total.month_rx + total.month_tx)}
-━━━━━━━━━━━━━━━━━━━━
-${lines}${more}`;
+  // 用选中模板渲染
+  const { templates, active } = await getTemplates(env);
+  const tpl = templates.find(x => x.id === active) || templates[0] || BUILTIN_TEMPLATES[0];
+  const msg = renderTemplate(tpl, machines, total);
 
   // 发送到 Telegram
   const apiUrl = `https://api.telegram.org/bot${t_token}/sendMessage`;
@@ -1430,6 +1507,15 @@ td.ops button{margin-right:4px}
 .batch-bar{display:none;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 10px;padding:8px 10px;background:#0e1628;border:1px solid #243049;border-radius:8px;font-size:12px}
 .batch-bar.show{display:flex}
 .batch-bar button{padding:5px 10px;font-size:12px}
+textarea{width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid #33415f;background:#0b1220;color:#e8eefc;outline:none;font-family:monospace;font-size:12px;resize:vertical}
+textarea:focus{border-color:#3b82f6}
+.tpl-col{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.tpl-help{font-size:11px;color:#8aa0c6;line-height:1.6;background:#0b1220;border:1px solid #1e2a42;border-radius:8px;padding:10px;margin-top:8px}
+.tpl-help code{background:#1a2740;padding:1px 4px;border-radius:3px}
+.tpl-preview{background:#0b1220;border:1px solid #243049;border-radius:8px;padding:12px;font-family:monospace;font-size:12px;white-space:pre-wrap;line-height:1.6;max-height:300px;overflow:auto;color:#c7d2fe}
+.tpl-active-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.tpl-active-row select{flex:0 0 auto}
+
 .row-check{width:18px;height:18px;cursor:pointer;accent-color:#3b82f6}
 
 
@@ -1531,6 +1617,46 @@ td.ops button{margin-right:4px}
         <button type="button" onclick="switchTab('dash')">关闭</button>
         <span id="saveStatus" class="muted"></span>
       </div>
+    </div>
+
+    <div class="panel settings-form">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+        <h2 style="margin:0">TG 汇报模板</h2>
+        <button type="button" class="green" onclick="sendTgSummary()" id="btnTgNow" title="立即发送一次 TG 汇总">立即汇报</button>
+      </div>
+      <p class="muted" style="font-size:12px;margin-top:8px">选择/编辑汇报模板，支持内置与自定义。改完点「保存模板」。</p>
+      <div class="tpl-active-row">
+        <label style="margin:0">当前模板：</label>
+        <select id="tplActive" onchange="onTplActiveChange()"></select>
+        <button type="button" onclick="tplNew()">新建模板</button>
+        <button type="button" onclick="tplDelete()" class="danger">删除</button>
+        <button type="button" onclick="tplReset()">恢复内置</button>
+      </div>
+      <label for="tplName">模板名称</label>
+      <input id="tplName" type="text" placeholder="如：我的日报">
+      <div class="tpl-col">
+        <div>
+          <label for="tplBody">正文（{machine_lines} 处循环各机）</label>
+          <textarea id="tplBody" rows="9" placeholder="📊 流量汇总..."></textarea>
+        </div>
+        <div>
+          <label for="tplLine">每机行模板</label>
+          <textarea id="tplLine" rows="9" placeholder="{status} {m_id} 入{today_rx}/出{today_tx}"></textarea>
+        </div>
+      </div>
+      <div class="tpl-help">
+        占位符：<code>{"{time}","{host_count}","{online_count}","{today_rx}","{today_tx}","{today_total}","{month_rx}","{month_tx}","{month_total}"}</code> 用于正文；
+        每机行还可用 <code>{"{status}","{m_id}","{hostname}","{iface}"}</code> 及该机的 today/month。<code>{"{machine_lines}"}</code> 放正文里代表各机列表。
+      </div>
+      <div class="save-row" style="margin-top:14px">
+        <button class="primary" onclick="tplSave()">保存模板</button>
+        <button type="button" onclick="tplPreview()">预览</button>
+        <span id="tplStatus" class="muted"></span>
+      </div>
+      <details style="margin-top:8px">
+        <summary style="cursor:pointer;color:#9fb3d9;font-size:12px">预览结果（点开）</summary>
+        <pre class="tpl-preview" id="tplPreview" style="margin-top:8px">（点「预览」用当前数据渲染）</pre>
+      </details>
     </div>
   </div>
 </main>
@@ -1682,7 +1808,7 @@ function switchTab(name) {
   const pname = name[0].toUpperCase() + name.slice(1);
   document.getElementById("page" + pname).classList.add("active");
   document.getElementById("tab" + pname).classList.add("active");
-  if (name === "settings") loadConfig();
+  if (name === "settings") { loadConfig(); loadTemplates(); }
   if (name === "dash") refresh();
 }
 
@@ -2146,6 +2272,109 @@ async function loadConfig() {
   if (hi) hi.textContent = data.t_id_from_env
     ? "✓ 已使用环境变量 TG_ID（页面留空即可）"
     : "页面未填时使用环境变量 TG_ID";
+}
+
+// ─── TG 模板 ───
+let tplList = [];
+let tplActiveId = "simple";
+let tplEditingId = "";
+
+async function loadTemplates() {
+  try {
+    const d = await api("/api/tg-templates");
+    if (!d || !d.ok) return;
+    tplList = d.templates || [];
+    tplActiveId = d.active || "simple";
+    renderTplUI();
+  } catch (e) { /* ignore */ }
+}
+function curTpl() {
+  return tplList.find(x => x.id === (tplEditingId || tplActiveId)) || tplList[0] || { id:"", name:"", body:"", machine_line:"" };
+}
+function renderTplUI() {
+  const sel = document.getElementById("tplActive");
+  if (sel) {
+    sel.replaceChildren();
+    for (const t of tplList) {
+      const o = document.createElement("option");
+      o.value = t.id; o.textContent = (t.builtin ? "★ " : "") + (t.name || t.id);
+      sel.appendChild(o);
+    }
+    sel.value = tplActiveId;
+  }
+  const c = curTpl();
+  tplEditingId = c.id;
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ""; };
+  set("tplName", c.name); set("tplBody", c.body); set("tplLine", c.machine_line);
+}
+function onTplActiveChange() {
+  tplActiveId = document.getElementById("tplActive").value;
+  tplEditingId = tplActiveId;
+  renderTplUI();
+}
+function tplNew() {
+  const id = "tpl_" + Math.random().toString(36).slice(2, 8);
+  const t = { id, name: "新模板", builtin: false, body: "📊 流量汇总\n时间：{time}\n{machine_lines}", machine_line: "{status} {m_id} 入{today_rx}/出{today_tx}" };
+  tplList.push(t); tplEditingId = id; tplActiveId = id;
+  renderTplUI();
+}
+function tplDelete() {
+  const c = curTpl();
+  if (!c || !c.id) return;
+  if (c.builtin) { toast("内置模板不可删除"); return; }
+  if (!confirm("删除模板「" + (c.name || c.id) + "」？")) return;
+  tplList = tplList.filter(x => x.id !== c.id);
+  if (tplActiveId === c.id) tplActiveId = tplList[0]?.id || "simple";
+  tplEditingId = tplActiveId;
+  saveTplAll("已删除");
+}
+async function tplReset() {
+  if (!confirm("恢复为内置两个模板？自定义模板会丢失。")) return;
+  tplList = [
+    { id:"simple", name:"简洁日报", builtin:true, body:"📊 流量汇总\n时间：{time}\n主机：{host_count} 台（在线 {online_count}）\n今日：入 {today_rx} / 出 {today_tx} / 合 {today_total}\n本月：入 {month_rx} / 出 {month_tx} / 合 {month_total}\n━━━━━━━━━━━━\n{machine_lines}", machine_line:"{status} {m_id}  入{today_rx}/出{today_tx}  月{month_rx}/{month_tx}" },
+    { id:"detailed", name:"详细日报", builtin:true, body:"📊 流量详细日报\n━━━━━━━━━━━━\n时间：{time}\n主机数：{host_count}（在线 {online_count}）\n\n【今日】入 {today_rx} / 出 {today_tx} / 合计 {today_total}\n【本月】入 {month_rx} / 出 {month_tx} / 合计 {month_total}\n━━━━━━━━━━━━\n各机明细：\n{machine_lines}", machine_line:"{status} {m_id}({hostname}) 今日 入{today_rx} 出{today_tx} | 本月 入{month_rx} 出{month_tx}" },
+  ];
+  tplActiveId = "simple"; tplEditingId = "simple";
+  await saveTplAll("已恢复内置");
+}
+async function tplSave() {
+  const c = curTpl();
+  if (!c.id) { toast("请新建或选择模板"); return; }
+  const idx = tplList.findIndex(x => x.id === c.id);
+  const updated = {
+    id: c.id, builtin: c.builtin,
+    name: document.getElementById("tplName").value.trim() || c.id,
+    body: document.getElementById("tplBody").value,
+    machine_line: document.getElementById("tplLine").value,
+  };
+  if (idx >= 0) tplList[idx] = updated; else tplList.push(updated);
+  await saveTplAll("模板已保存");
+}
+async function saveTplAll(msg) {
+  try {
+    const d = await api("/api/tg-templates", {
+      method: "POST",
+      body: JSON.stringify({ templates: tplList, active: tplActiveId }),
+    });
+    if (!d || !d.ok) { toast(d?.error || "保存失败"); return; }
+    tplList = d.templates || tplList;
+    tplActiveId = d.active || tplActiveId;
+    renderTplUI();
+    const st = document.getElementById("tplStatus"); if (st) { st.textContent = "✓ " + msg; setTimeout(() => st.textContent = "", 2500); }
+  } catch (e) { toast("保存失败：" + (e && e.message ? e.message : e)); }
+}
+async function tplPreview() {
+  const tpl = {
+    name: document.getElementById("tplName").value,
+    body: document.getElementById("tplBody").value,
+    machine_line: document.getElementById("tplLine").value,
+  };
+  try {
+    const d = await api("/api/tg-preview", { method: "POST", body: JSON.stringify({ template: tpl }) });
+    if (!d || !d.ok) { toast(d?.error || "预览失败"); return; }
+    const el = document.getElementById("tplPreview");
+    if (el) el.textContent = d.text || "(空)";
+  } catch (e) { toast("预览失败：" + (e && e.message ? e.message : e)); }
 }
 
 async function saveConfig() {
@@ -2801,6 +3030,44 @@ export default {
       try {
         const result = await forceReportPushAll(env);
         return json(result);
+      } catch (e) {
+        return json({ ok: false, error: String(e && e.message ? e.message : e) }, 500);
+      }
+    }
+
+    // GET /api/tg-templates — 模板列表
+    if (req.method === "GET" && url.pathname === "/api/tg-templates") {
+      try {
+        if (!env.DB) return json({ ok: false, error: missingDbError(env) }, 500);
+        return json({ ok: true, ...(await getTemplates(env)) });
+      } catch (e) {
+        return json({ ok: false, error: String(e && e.message ? e.message : e) }, 500);
+      }
+    }
+    // POST /api/tg-templates — 保存全部模板/active
+    if (req.method === "POST" && url.pathname === "/api/tg-templates") {
+      try {
+        if (!env.DB) return json({ ok: false, error: missingDbError(env) }, 500);
+        const b = await req.json();
+        const r = await saveTemplates(env, b && b.templates, b && b.active);
+        if (!r.ok) return json(r, 400);
+        return json(r);
+      } catch (e) {
+        return json({ ok: false, error: String(e && e.message ? e.message : e) }, 500);
+      }
+    }
+    // POST /api/tg-preview — 用当前数据预览模板
+    if (req.method === "POST" && url.pathname === "/api/tg-preview") {
+      try {
+        if (!env.DB) return json({ ok: false, error: missingDbError(env) }, 500);
+        const b = await req.json();
+        const machines = (await listMachines(env)).filter(m => m.in_tg_report !== false);
+        const total = machines.reduce((a, m) => ({
+          today_rx: a.today_rx + (m.today?.rx || 0), today_tx: a.today_tx + (m.today?.tx || 0),
+          month_rx: a.month_rx + (m.month?.rx || 0), month_tx: a.month_tx + (m.month?.tx || 0),
+        }), { today_rx: 0, today_tx: 0, month_rx: 0, month_tx: 0 });
+        const text = renderTemplate(b && b.template, machines, total);
+        return json({ ok: true, text });
       } catch (e) {
         return json({ ok: false, error: String(e && e.message ? e.message : e) }, 500);
       }
