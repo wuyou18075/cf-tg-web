@@ -1574,14 +1574,15 @@ function openForceResult(data) {
     status: x.status || 0,
     detail: x.detail || x.error || x.reason || "",
     reported: false,
+    abandoned: false,
     last_ts: 0,
   }));
   if (!rows.length) {
     const fail = data.fail_detail || [];
     const skip = data.skip_detail || [];
     rows = [
-      ...fail.map((x) => ({ machine_id: x.machine_id, state: "push_fail", status: x.status || 0, detail: x.error || "", reported: false, last_ts: 0 })),
-      ...skip.map((x) => ({ machine_id: x.machine_id, state: "skipped", status: 0, detail: x.reason || "", reported: false, last_ts: 0 })),
+      ...fail.map((x) => ({ machine_id: x.machine_id, state: "push_fail", status: x.status || 0, detail: x.error || "", reported: false, abandoned: false, last_ts: 0 })),
+      ...skip.map((x) => ({ machine_id: x.machine_id, state: "skipped", status: 0, detail: x.reason || "", reported: false, abandoned: false, last_ts: 0 })),
     ];
   }
   forceTrack = { force_at: forceAt, rows };
@@ -1590,7 +1591,7 @@ function openForceResult(data) {
     data.message || ("推送完成：成功 " + (data.accepted || 0) + " / 失败 " + (data.failed || 0) + " / 跳过 " + (data.skipped || 0));
   const pendingN = rows.filter((r) => r.state === "pushed").length;
   document.getElementById("forceResultNote").textContent = pendingN
-    ? "推送成功表示回调已收到；列表时间等实际上报。将每 2 秒刷新，全部成功后立即停止（最长约 30 秒）。"
+    ? "推送成功表示回调已收到；列表时间等实际上报。每 2 秒刷新；全部成功立即停，最多 30 秒后舍弃未上报机器并停止。"
     : "没有可等待上报的机器（全部跳过或推送失败），无需自动刷新。";
   document.getElementById("forceResultModal").classList.add("open");
   renderForceResult();
@@ -1624,6 +1625,9 @@ function renderForceResult() {
     if (r.reported) {
       b3.className = "badge reported";
       b3.textContent = "已上报";
+    } else if (r.abandoned) {
+      b3.className = "badge fail";
+      b3.textContent = "超时放弃";
     } else if (r.state === "pushed") {
       b3.className = "badge wait";
       b3.textContent = "等待中";
@@ -1634,6 +1638,7 @@ function renderForceResult() {
     td3.appendChild(b3);
     const td4 = document.createElement("td");
     let tip = reasonLabel(r.state, r.detail, r.status);
+    if (r.abandoned) tip = "超过 30 秒未上报，已停止等待";
     if (r.reported && r.last_ts) tip += " · 上报时间 " + fmtTime(r.last_ts);
     td4.textContent = tip;
     td4.style.color = "#9fb3d9";
@@ -1697,13 +1702,23 @@ function startForcePoll() {
         return; // 全部成功 → 立即停止，不再空转
       }
       if (n >= max) {
-        note.textContent = "仍有 " + pending + " 台未在时限内上报。请检查回调服务/防火墙；可点「刷新列表」稍后查看。已停止自动刷新。";
+        // 最多 30 秒：未上报的机器直接舍弃，不再刷新
+        for (const r of forceTrack.rows) {
+          if (r.state === "pushed" && !r.reported) r.abandoned = true;
+        }
+        renderForceResult();
+        note.textContent = "已达 30 秒上限：舍弃 " + pending + " 台未上报机器，停止自动刷新。可稍后手动点「刷新列表」。";
         forcePollTimer = null;
         return;
       }
-      note.textContent = "等待上报中… 剩余 " + pending + " 台 · 已刷新 " + n + " 次 · 最长约 " + Math.max(0, (max - n) * 2) + " 秒后停止";
+      note.textContent = "等待上报中… 剩余 " + pending + " 台 · 已刷新 " + n + " 次 · 最多 " + Math.max(0, (max - n) * 2) + " 秒后舍弃未上报";
     } catch (e) { /* ignore poll errors */ }
-    forcePollTimer = setTimeout(tick, 2000);
+    // 仅在仍有待上报时继续
+    if (forceTrack && forceTrack.rows.some((r) => r.state === "pushed" && !r.reported && !r.abandoned)) {
+      forcePollTimer = setTimeout(tick, 2000);
+    } else {
+      forcePollTimer = null;
+    }
   };
   forcePollTimer = setTimeout(tick, 1500);
 }
