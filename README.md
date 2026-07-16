@@ -55,26 +55,7 @@ journalctl -u traffic-telegram-report.service    # 日志
 
 ---
 
-## 方案二·A：CF 看板一键部署（新用户）
-
-点按钮，Cloudflare 打开部署表单：
-
-[![部署到 Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/wuyou18075/tg)
-
-表单参数（建成**加密变量**，可在 Dashboard 改）：
-
-| 参数 | 必填 | 含义 | 来源 |
-|------|------|------|------|
-| `PASSWORD` | ✅ | 看板登录密码 | 自己设 |
-| `TG_TOKEN` | ❌ | TG 机器人 Token（发汇总用） | BotFather |
-| `TG_ID` | ❌ | TG 聊天/群 ID | getUpdates 取 |
-| D1 数据库 | 自动 | 存机器/历史/token | CF 自动创建并绑定 |
-
-部署后：打开 Worker 地址 → 用 `PASSWORD` 登录 → 「添加 VPS」生成安装命令。
-
----
-
-## 方案二·B：GitHub Actions 部署（推荐，自动建 D1）
+## 方案二·A：GitHub Actions 部署（默认，自动建 D1）
 
 日常更新代码用这条。Actions 会**自动查找/创建 D1**，无需手填 `database_id`。
 
@@ -117,6 +98,25 @@ git push origin main
 ```
 
 Actions 流程：查找 D1 `tg-cf-web` → 不存在则创建 → 写 UUID → `wrangler deploy`。D1 表首次访问自动建。
+
+---
+
+## 方案二·B：CF 看板一键部署（新用户备选）
+
+点按钮，Cloudflare 打开部署表单：
+
+[![部署到 Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/wuyou18075/tg)
+
+表单参数（建成**加密变量**，可在 Dashboard 改）：
+
+| 参数 | 必填 | 含义 | 来源 |
+|------|------|------|------|
+| `PASSWORD` | ✅ | 看板登录密码 | 自己设 |
+| `TG_TOKEN` | ❌ | TG 机器人 Token（发汇总用） | BotFather |
+| `TG_ID` | ❌ | TG 聊天/群 ID | getUpdates 取 |
+| D1 数据库 | 自动 | 存机器/历史/token | CF 自动创建并绑定 |
+
+部署后：打开 Worker 地址 → 用 `PASSWORD` 登录 → 「添加 VPS」生成安装命令。
 
 ---
 
