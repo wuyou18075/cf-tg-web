@@ -699,6 +699,20 @@ async function forceReportPushAll(env) {
 
   const okN = resultsPush.filter((x) => x.ok).length;
   const fail = resultsPush.filter((x) => !x.ok);
+  const detail = [
+    ...resultsPush.map((x) => ({
+      machine_id: x.machine_id,
+      state: x.ok ? "pushed" : "push_fail",
+      status: x.status,
+      detail: (x.body || "").slice(0, 200),
+    })),
+    ...skipped.map((x) => ({
+      machine_id: x.machine_id,
+      state: "skipped",
+      status: 0,
+      detail: x.reason || "skipped",
+    })),
+  ];
   return {
     ok: true,
     force_at,
@@ -707,13 +721,14 @@ async function forceReportPushAll(env) {
     accepted: okN,
     failed: fail.length,
     skipped: skipped.length,
+    detail: detail.slice(0, 100),
     fail_detail: fail.slice(0, 20).map((x) => ({
       machine_id: x.machine_id,
       status: x.status,
       error: x.body,
     })),
     skip_detail: skipped.slice(0, 20),
-    message: `已推送 ${okN}/${resultsPush.length} 台（跳过 ${skipped.length}，失败 ${fail.length}）；无公网/未登记 callback 的机器无法即时推送，请检查 cb_url 与防火墙（无 poll 兜底）`,
+    message: `推送 ${okN}/${resultsPush.length} 成功，跳过 ${skipped.length}，失败 ${fail.length}`,
   };
 }
 
@@ -907,6 +922,23 @@ td.ops button{margin-right:4px}
 .chk input{accent-color:#3b82f6}
 .chart-title-row{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
 .chart-title-row h2{margin:0}
+.result-sum{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0 14px}
+.result-sum .pill{padding:6px 12px;border-radius:999px;font-size:12px;border:1px solid #33415f;background:#0b1220}
+.result-sum .pill.ok{color:#34d399;border-color:#14532d}
+.result-sum .pill.fail{color:#f87171;border-color:#7f1d1d}
+.result-sum .pill.skip{color:#fbbf24;border-color:#78350f}
+.result-sum .pill.wait{color:#93c5fd;border-color:#1e3a5f}
+.result-table{width:100%;border-collapse:collapse;font-size:12px}
+.result-table th,.result-table td{padding:8px 10px;border-bottom:1px solid #1e2a42;text-align:left;vertical-align:top}
+.result-table th{color:#8aa0c6;font-weight:500}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;border:1px solid #33415f}
+.badge.ok{background:#052e1a;color:#34d399;border-color:#14532d}
+.badge.fail{background:#2a0f0f;color:#f87171;border-color:#7f1d1d}
+.badge.skip{background:#2a2008;color:#fbbf24;border-color:#78350f}
+.badge.wait{background:#0b1a2e;color:#93c5fd;border-color:#1e3a5f}
+.badge.reported{background:#0c2a1a;color:#6ee7b7;border-color:#065f46}
+.result-note{font-size:12px;color:#8aa0c6;margin:10px 0 0;line-height:1.5}
+
 
 </style>
 
@@ -1069,6 +1101,33 @@ td.ops button{margin-right:4px}
     <div class="chart-wrap" style="height:320px"><canvas id="histChart"></canvas></div>
     <div class="btn-row" style="margin-top:14px">
       <button onclick="closeHistModal()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 获取流量结果弹窗 -->
+<div class="modal-overlay" id="forceResultModal">
+  <div class="modal" style="width:min(720px,96vw)">
+    <h2 id="forceResultTitle">获取流量结果</h2>
+    <p class="desc" id="forceResultDesc">推送回调后，等待 VPS 上报…</p>
+    <div class="result-sum" id="forceResultSum"></div>
+    <div style="max-height:360px;overflow:auto;border:1px solid #243049;border-radius:8px">
+      <table class="result-table">
+        <thead>
+          <tr>
+            <th style="width:28%">机器</th>
+            <th style="width:18%">推送</th>
+            <th style="width:18%">上报</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody id="forceResultBody"></tbody>
+      </table>
+    </div>
+    <p class="result-note" id="forceResultNote"></p>
+    <div class="btn-row" style="margin-top:14px">
+      <button class="primary" onclick="closeForceResult()">关闭</button>
+      <button onclick="refresh(); toast('已刷新列表')">刷新列表</button>
     </div>
   </div>
 </div>
@@ -1485,38 +1544,206 @@ async function saveConfig() {
 
 
 // ─── 获取流量（签名推送到各 VPS 回调） ───
+let forcePollTimer = null;
+let forceTrack = null; // { force_at, rows:[{machine_id,state,status,detail,reported,last_ts}] }
+
+function reasonLabel(state, detail, status) {
+  if (state === "pushed") return "回调已接受";
+  if (state === "push_fail") {
+    const d = String(detail || "");
+    if (/abort|Timeout|timeout/i.test(d)) return "超时（VPS 无响应/防火墙）";
+    if (/Failed to fetch|NetworkError|fetch failed/i.test(d)) return "网络不可达";
+    if (detail) return (status ? ("HTTP " + status + " ") : "") + d.slice(0, 120);
+    return "推送失败";
+  }
+  if (state === "skipped") {
+    if (detail === "no_callback_url") return "未登记回调地址（需重装/更新注册）";
+    if (detail === "no_token") return "无 token";
+    return String(detail || "已跳过");
+  }
+  return String(detail || "");
+}
+
+function openForceResult(data) {
+  const forceAt = Number(data.force_at) || Math.floor(Date.now() / 1000);
+  const detail = Array.isArray(data.detail) ? data.detail : [];
+  // 若无 detail，从 fail/skip 拼
+  let rows = detail.map((x) => ({
+    machine_id: x.machine_id,
+    state: x.state || (x.ok ? "pushed" : "push_fail"),
+    status: x.status || 0,
+    detail: x.detail || x.error || x.reason || "",
+    reported: false,
+    last_ts: 0,
+  }));
+  if (!rows.length) {
+    const fail = data.fail_detail || [];
+    const skip = data.skip_detail || [];
+    rows = [
+      ...fail.map((x) => ({ machine_id: x.machine_id, state: "push_fail", status: x.status || 0, detail: x.error || "", reported: false, last_ts: 0 })),
+      ...skip.map((x) => ({ machine_id: x.machine_id, state: "skipped", status: 0, detail: x.reason || "", reported: false, last_ts: 0 })),
+    ];
+  }
+  forceTrack = { force_at: forceAt, rows };
+  document.getElementById("forceResultTitle").textContent = "获取流量结果";
+  document.getElementById("forceResultDesc").textContent =
+    data.message || ("推送完成：成功 " + (data.accepted || 0) + " / 失败 " + (data.failed || 0) + " / 跳过 " + (data.skipped || 0));
+  document.getElementById("forceResultNote").textContent =
+    "推送成功仅表示 VPS 回调口收到指令；列表时间更新需等该机实际上报。正在自动刷新等待上报（约 30 秒）…";
+  document.getElementById("forceResultModal").classList.add("open");
+  renderForceResult();
+  startForcePoll();
+}
+
+function renderForceResult() {
+  if (!forceTrack) return;
+  const body = document.getElementById("forceResultBody");
+  const sum = document.getElementById("forceResultSum");
+  if (!body || !sum) return;
+
+  let nPushOk = 0, nPushFail = 0, nSkip = 0, nReported = 0;
+  body.replaceChildren();
+  for (const r of forceTrack.rows) {
+    if (r.state === "pushed") nPushOk++;
+    else if (r.state === "push_fail") nPushFail++;
+    else nSkip++;
+    if (r.reported) nReported++;
+
+    const tr = document.createElement("tr");
+    const td1 = document.createElement("td");
+    td1.textContent = r.machine_id;
+    const td2 = document.createElement("td");
+    const b2 = document.createElement("span");
+    b2.className = "badge " + (r.state === "pushed" ? "ok" : r.state === "push_fail" ? "fail" : "skip");
+    b2.textContent = r.state === "pushed" ? "成功" : r.state === "push_fail" ? "失败" : "跳过";
+    td2.appendChild(b2);
+    const td3 = document.createElement("td");
+    const b3 = document.createElement("span");
+    if (r.reported) {
+      b3.className = "badge reported";
+      b3.textContent = "已上报";
+    } else if (r.state === "pushed") {
+      b3.className = "badge wait";
+      b3.textContent = "等待中";
+    } else {
+      b3.className = "badge skip";
+      b3.textContent = "—";
+    }
+    td3.appendChild(b3);
+    const td4 = document.createElement("td");
+    let tip = reasonLabel(r.state, r.detail, r.status);
+    if (r.reported && r.last_ts) tip += " · 上报时间 " + fmtTime(r.last_ts);
+    td4.textContent = tip;
+    td4.style.color = "#9fb3d9";
+    tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3); tr.appendChild(td4);
+    body.appendChild(tr);
+  }
+
+  sum.replaceChildren();
+  const pills = [
+    ["ok", "推送成功 " + nPushOk],
+    ["fail", "推送失败 " + nPushFail],
+    ["skip", "跳过 " + nSkip],
+    ["wait", "已上报 " + nReported + "/" + nPushOk],
+  ];
+  for (const [cls, text] of pills) {
+    const s = document.createElement("span");
+    s.className = "pill " + cls;
+    s.textContent = text;
+    sum.appendChild(s);
+  }
+}
+
+function closeForceResult() {
+  document.getElementById("forceResultModal").classList.remove("open");
+  if (forcePollTimer) { clearTimeout(forcePollTimer); forcePollTimer = null; }
+}
+
+function startForcePoll() {
+  if (forcePollTimer) { clearTimeout(forcePollTimer); forcePollTimer = null; }
+  let n = 0;
+  const max = 15; // ~30s (2s interval)
+  const tick = async () => {
+    n++;
+    try {
+      await refresh();
+      if (forceTrack) {
+        const byId = new Map(machines.map((m) => [m.machine_id, m]));
+        let allDone = true;
+        for (const r of forceTrack.rows) {
+          const m = byId.get(r.machine_id);
+          const ts = m ? (Number(m.ts) || 0) : 0;
+          if (ts >= forceTrack.force_at) {
+            r.reported = true;
+            r.last_ts = ts;
+          } else if (r.state === "pushed") {
+            allDone = false;
+          }
+        }
+        renderForceResult();
+        const pending = forceTrack.rows.filter((r) => r.state === "pushed" && !r.reported).length;
+        const note = document.getElementById("forceResultNote");
+        if (pending === 0) {
+          note.textContent = "全部可推送机器已完成上报，列表时间已更新。";
+        } else if (n >= max) {
+          note.textContent = "仍有 " + pending + " 台未在时限内上报。请检查 VPS 回调服务、防火墙端口与 callback_url；也可点「刷新列表」稍后查看。";
+        } else {
+          note.textContent = "等待上报中… 剩余约 " + Math.max(0, (max - n) * 2) + " 秒（已刷新 " + n + " 次）";
+        }
+        if (allDone || n >= max) {
+          forcePollTimer = null;
+          return;
+        }
+      }
+    } catch (e) { /* ignore poll errors */ }
+    forcePollTimer = setTimeout(tick, 2000);
+  };
+  forcePollTimer = setTimeout(tick, 1500);
+}
+
 async function forceFetchAll() {
   const btn = document.getElementById("btnForceFetch");
   const st = document.getElementById("tgSumStatus");
   btn.disabled = true;
   const orig = btn.textContent;
   btn.textContent = "推送中…";
-  st.textContent = "";
+  st.textContent = "正在推送到各 VPS…";
   try {
     const data = await api("/api/force-report", { method: "POST" });
     if (!data || !data.ok) {
       st.textContent = "✗ " + (data?.error || "失败");
-      toast("获取流量失败：" + (data?.error || "未知错误"));
+      openForceResult({
+        ok: false,
+        force_at: Math.floor(Date.now() / 1000),
+        accepted: 0,
+        failed: 1,
+        skipped: 0,
+        message: "获取流量失败：" + (data?.error || "未知错误"),
+        detail: [{ machine_id: "—", state: "push_fail", status: 0, detail: data?.error || "未知错误" }],
+      });
+      document.getElementById("forceResultTitle").textContent = "获取流量失败";
+      document.getElementById("forceResultNote").textContent = "请求未成功，未向 VPS 发起推送。";
     } else {
       const acc = data.accepted != null ? data.accepted : 0;
-      const push = data.pushed != null ? data.pushed : (data.machines || 0);
-      st.textContent = "✓ 推送成功 " + acc + "/" + push + "（跳过 " + (data.skipped || 0) + "）";
-      toast(data.message || ("已推送 " + acc + " 台"));
-      let n = 0;
-      const tick = async () => {
-        n++;
-        await refresh();
-        if (n < 6) setTimeout(tick, 5000);
-      };
-      setTimeout(tick, 2000);
+      const push = data.pushed != null ? data.pushed : 0;
+      st.textContent = "✓ 推送 " + acc + "/" + push + "（失败 " + (data.failed || 0) + "，跳过 " + (data.skipped || 0) + "）";
+      openForceResult(data);
+      // 立即刷一次列表
+      await refresh();
     }
   } catch (e) {
     st.textContent = "✗ " + e.message;
-    toast("获取流量失败：" + e.message);
+    openForceResult({
+      ok: false,
+      force_at: Math.floor(Date.now() / 1000),
+      message: "获取流量失败：" + e.message,
+      detail: [{ machine_id: "—", state: "push_fail", status: 0, detail: e.message }],
+    });
+    document.getElementById("forceResultTitle").textContent = "获取流量失败";
   } finally {
     btn.textContent = orig;
     btn.disabled = false;
-    setTimeout(() => { if (st.textContent.startsWith("✓")) st.textContent = ""; }, 12000);
+    setTimeout(() => { if (st && st.textContent.startsWith("✓")) st.textContent = ""; }, 15000);
   }
 }
 
@@ -1672,6 +1899,9 @@ document.getElementById("modalUpdate").addEventListener("click", e => {
 });
 document.getElementById("histModal").addEventListener("click", e => {
   if (e.target === e.currentTarget) closeHistModal();
+});
+document.getElementById("forceResultModal").addEventListener("click", e => {
+  if (e.target === e.currentTarget) closeForceResult();
 });
 document.getElementById("vpsMid").addEventListener("keydown", e => {
   if (e.key === "Enter") genCmd();
