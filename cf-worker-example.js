@@ -31,8 +31,23 @@ function missingDbError(env) {
 }
 
 
+/** JSON 中非 ASCII 一律 \uXXXX，避免链路把 UTF-8 多字节解错成乱码 */
+function jsonStringifySafe(data) {
+  return JSON.stringify(data).replace(/[-￿]/g, (ch) => {
+    const cp = ch.codePointAt(0);
+    if (cp > 0xffff) {
+      const s = String.fromCodePoint(cp);
+      return (
+        "\\u" + s.charCodeAt(0).toString(16).padStart(4, "0") +
+        "\\u" + s.charCodeAt(1).toString(16).padStart(4, "0")
+      );
+    }
+    return "\\u" + cp.toString(16).padStart(4, "0");
+  });
+}
+
 const json = (data, status = 200, extra = {}) =>
-  new Response(JSON.stringify(data), {
+  new Response(jsonStringifySafe(data), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
@@ -714,9 +729,12 @@ function loginPage(err = "") {
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>登录 · 流量看板</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root{color-scheme:dark}
-body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif;background:#0b1220;color:#e8eefc}
+body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:"Noto Sans SC","Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;background:#0b1220;color:#e8eefc}
 .card{width:min(360px,92vw);background:#121a2b;border:1px solid #243049;border-radius:14px;padding:28px 24px;box-shadow:0 12px 40px #0006}
 h1{font-size:18px;margin:0 0 6px}
 p{margin:0 0 18px;color:#8aa0c6;font-size:13px}
@@ -743,11 +761,14 @@ function dashboardPage() {
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>流量看板</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
 :root{color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0;font-family:"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif;background:#0b1220;color:#e8eefc}
+body{margin:0;font-family:"Noto Sans SC","Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;background:#0b1220;color:#e8eefc}
 header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid #1e2a42;background:#0e1628}
 header h1{font-size:18px;margin:0}
 .nav{display:flex;gap:4px;margin-left:16px}
@@ -1030,6 +1051,7 @@ function renderTable() {
     for (const text of texts) {
       const td = document.createElement("td");
       td.textContent = text;
+      td.title = text;
       tr.appendChild(td);
     }
 
