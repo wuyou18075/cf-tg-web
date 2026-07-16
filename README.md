@@ -71,13 +71,25 @@ bash /usr/local/sbin/traffic-telegram-report --uninstall 2>/dev/null || bash sum
 
 [![部署到 Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/wuyou18075/tg)
 
-表单里会让你填：
+表单里会让你填以下参数（都会自动创建为**加密变量**，部署后可在 CF Dashboard 修改）：
 
-- `PASSWORD`：看板登录密码（必填，自己设）
-- `TG_TOKEN` / `TG_ID`：可选，TG 机器人 Token 与 Chat ID（用于看板发 TG 汇总）
-- D1 数据库：CF 自动创建并绑定，无需手动建
+| 参数 | 必填 | 含义与格式 | 来源 / 说明 |
+|------|------|-----------|-------------|
+| `PASSWORD` | ✅ | 看板登录密码 | 自己设一个，至少 8 位 |
+| `TG_TOKEN` | ❌ | TG 机器人 Token，看板用它发 TG 汇总 | [@BotFather](https://t.me/BotFather) `/newbot` 创建机器人后获得，格式 `123456789:ABCdef...` |
+| `TG_ID` | ❌ | TG 聊天/群 ID | 把机器人拉进群或私聊它，访问 `https://api.telegram.org/bot<你的TG_TOKEN>/getUpdates` 取 `chat.id`；群为负数、个人为正数 |
+| D1 数据库 | 自动 | 存机器列表、历史流量、access_token | CF 一键部署**自动创建并绑定**，无需手填 |
 
-填完 Deploy 即可。所有变量自动创建为**加密变量**，后续部署不会删。部署完打开 Worker 地址用 `PASSWORD` 登录，再到看板「添加 VPS」生成每台机器的安装命令（含独立 `access_token`）。
+> `TG_TOKEN`/`TG_ID` 留空也能部署，只是看板顶部 TG 状态会显示「未配置」；以后想用 TG 汇总再补。
+
+除了表单参数，部署后还有两个**自动管理**的关键参数（无需手填，了解即可）：
+
+| 参数 | 含义 | 怎么来 |
+|------|------|--------|
+| `access_token` | Web(Worker) ↔ 每台 VPS 的通信密钥，上报与「获取流量」推送都用它 | 看板「添加 VPS」时**每台独立生成**，互不相同 |
+| `database_id` | D1 数据库 ID | 一键部署时 CF 自动创建并回填到 `wrangler.toml` |
+
+**部署后操作：** 打开 Worker 地址 → 用 `PASSWORD` 登录 → 「添加 VPS」生成每台机器的安装命令（含该机独立 `access_token`）→ 在 VPS 上执行即可开始上报。
 
 > 已部署用户日常更新代码用 git push（见方案二·B），不必重复一键部署。
 
