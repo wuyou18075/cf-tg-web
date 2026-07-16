@@ -4,7 +4,7 @@
  * - 密码登录看板 + 配置面板（t_token/t_id/t_time/cf_time）
  * - 添加 VPS：生成唯一独立密码，VPS 用此密码上报（不暴露全局 TG 密钥）
  * - TG 汇总：看板「发送 TG 汇总」→ 聚合所有机器 → 发 Telegram
- * - D1 历史曲线 + Chart.js
+ * - D1 历史柱状图 + Chart.js
  *
  * 部署：
  *   1. 创建 D1 数据库 traffic-db
@@ -860,7 +860,7 @@ td.ops button{margin-right:4px}
     </div>
     <div class="cards" id="summary"></div>
     <div class="panel">
-      <h2>历史曲线 · 今日累计（GB）</h2>
+      <h2>历史统计 · 今日累计（GB）</h2>
       <div class="chart-wrap"><canvas id="chart"></canvas></div>
     </div>
     <div class="panel">
@@ -1108,15 +1108,18 @@ async function loadHistory() {
   const ctx = document.getElementById("chart");
   if (chart) chart.destroy();
   chart = new Chart(ctx, {
-    type: "line",
+    type: "bar",
     data: { labels, datasets: [
-      { label: "今日入站 GB", data: rx, borderColor: "#60a5fa", tension: 0.25, pointRadius: 0, borderWidth: 2 },
-      { label: "今日出站 GB", data: tx, borderColor: "#34d399", tension: 0.25, pointRadius: 0, borderWidth: 2 },
-      { label: "今日合计 GB", data: total, borderColor: "#fbbf24", tension: 0.25, pointRadius: 0, borderWidth: 2 },
+      { label: "今日入站 GB", data: rx, backgroundColor: "rgba(96,165,250,0.75)", borderColor: "#60a5fa", borderWidth: 1, borderRadius: 4, borderSkipped: false },
+      { label: "今日出站 GB", data: tx, backgroundColor: "rgba(52,211,153,0.75)", borderColor: "#34d399", borderWidth: 1, borderRadius: 4, borderSkipped: false },
+      { label: "今日合计 GB", data: total, backgroundColor: "rgba(251,191,36,0.75)", borderColor: "#fbbf24", borderWidth: 1, borderRadius: 4, borderSkipped: false },
     ]},
     options: { responsive: true, maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
-      scales: { x: { ticks: { maxTicksLimit: 8, color: "#8aa0c6" }, grid: { color: "#1e2a42" } },
-        y: { ticks: { color: "#8aa0c6" }, grid: { color: "#1e2a42" }, title: { display: true, text: "GB", color: "#8aa0c6" } } },
+      datasets: { bar: { categoryPercentage: 0.7, barPercentage: 0.85, maxBarThickness: 28 } },
+      scales: {
+        x: { ticks: { maxTicksLimit: 12, color: "#8aa0c6", maxRotation: 0, autoSkip: true }, grid: { color: "#1e2a42", display: false } },
+        y: { beginAtZero: true, ticks: { color: "#8aa0c6" }, grid: { color: "#1e2a42" }, title: { display: true, text: "GB", color: "#8aa0c6" } }
+      },
       plugins: { legend: { labels: { color: "#c7d2fe" } }, title: { display: true, text: selected, color: "#e8eefc" } } }
   });
 }
