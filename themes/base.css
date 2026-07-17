@@ -268,3 +268,10 @@ td.clip-cell{max-width:12em}
 .list-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px}
 .list-head h2{margin:0}
 .list-head-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
+
+/* 编辑分组列表 */
+.edit-groups-list{display:flex;flex-direction:column;gap:8px;max-height:min(50vh,360px);overflow:auto;margin-top:8px}
+.edit-group-row{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--panel2)}
+.edit-group-row .eg-name{font-weight:600;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.edit-group-row .eg-meta{font-size:12px;white-space:nowrap}
+.edit-group-row .eg-actions{display:flex;gap:6px;flex-wrap:wrap}

@@ -504,6 +504,46 @@ async function setMachinesGroup(env, mids, groupName) {
   return { ok: true, updated: ids.length, group_name: g };
 }
 
+/** 重命名分组：登记表 + 所有机器 group_name */
+async function renameGroup(env, oldName, newName) {
+  if (!env.DB) throw new Error(missingDbError(env));
+  const from = String(oldName || "").trim().slice(0, 40);
+  const to = String(newName || "").trim().slice(0, 40);
+  if (!from) return { ok: false, error: "请选择要重命名的分组" };
+  if (!to) return { ok: false, error: "新分组名不能为空" };
+  if (from === to) return { ok: false, error: "新名称与旧名称相同" };
+  const names = await getGroupNames(env);
+  if (!names.includes(from)) {
+    // 仍允许改机器上的孤儿分组名
+  }
+  if (names.includes(to) && to !== from) {
+    return { ok: false, error: "新分组名已存在" };
+  }
+  const next = names.filter((x) => x !== from);
+  if (!next.includes(to)) next.push(to);
+  await saveGroupNames(env, next);
+  const r = await env.DB.prepare(
+    `UPDATE machines SET group_name = ? WHERE group_name = ?`
+  ).bind(to, from).run();
+  const moved = Number((r && r.meta && r.meta.changes) || 0);
+  return { ok: true, old_name: from, new_name: to, groups: next, machines_updated: moved };
+}
+
+/** 删除分组：从登记表移除，机器上该组清空为未分组 */
+async function deleteGroup(env, name) {
+  if (!env.DB) throw new Error(missingDbError(env));
+  const g = String(name || "").trim().slice(0, 40);
+  if (!g) return { ok: false, error: "请选择要删除的分组" };
+  const names = await getGroupNames(env);
+  const next = names.filter((x) => x !== g);
+  await saveGroupNames(env, next);
+  const r = await env.DB.prepare(
+    `UPDATE machines SET group_name = '' WHERE group_name = ?`
+  ).bind(g).run();
+  const cleared = Number((r && r.meta && r.meta.changes) || 0);
+  return { ok: true, deleted: g, groups: next, machines_cleared: cleared };
+}
+
 async function getHistory(env, mid, hours) {
   const since = Math.floor(Date.now() / 1000) - hours * 3600;
   const { results } = await env.DB.prepare(
@@ -2312,6 +2352,13 @@ td.clip-cell{max-width:12em}
 .list-head h2{margin:0}
 .list-head-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
 
+/* 编辑分组列表 */
+.edit-groups-list{display:flex;flex-direction:column;gap:8px;max-height:min(50vh,360px);overflow:auto;margin-top:8px}
+.edit-group-row{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--panel2)}
+.edit-group-row .eg-name{font-weight:600;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.edit-group-row .eg-meta{font-size:12px;white-space:nowrap}
+.edit-group-row .eg-actions{display:flex;gap:6px;flex-wrap:wrap}
+
 /* theme token: 原谅色（prairie）— 柔雾浅绿 + 图表冷暖对比 */
 html[data-theme="prairie"]{
   color-scheme:light;
@@ -3387,9 +3434,9 @@ textarea:focus{border-color:var(--accent)}
               <button type="button" data-mode="month" onclick="setChartMode('month')">月报</button>
               <button type="button" data-mode="year" onclick="setChartMode('year')">年报</button>
             </div>
-            <label class="chk"><input type="checkbox" id="chkRx" checked onchange="renderMainChart()"> 入站</label>
-            <label class="chk"><input type="checkbox" id="chkTx" checked onchange="renderMainChart()"> 出站</label>
-            <select id="range" onchange="loadHistory()" title="选择统计跨度"></select>
+            <label class="chk"><input type="checkbox" id="chkRx" checked onchange="onChartSeriesChange()"> 入站</label>
+            <label class="chk"><input type="checkbox" id="chkTx" checked onchange="onChartSeriesChange()"> 出站</label>
+            <select id="range" onchange="onChartRangeChange()" title="选择统计跨度"></select>
           </div>
           <div class="chart-wrap"><canvas id="chart"></canvas></div>
         </div>
@@ -3416,6 +3463,7 @@ textarea:focus{border-color:var(--accent)}
             <option value="__none__">未分组</option>
           </select>
           <button type="button" onclick="createGroupPrompt()">新建分组</button>
+          <button type="button" onclick="openEditGroupsModal()">编辑分组</button>
         </div>
       </div>
       <div class="batch-bar" id="batchBar">
@@ -3734,6 +3782,21 @@ textarea:focus{border-color:var(--accent)}
     <div class="btn-row">
       <button class="primary" onclick="confirmGroupModal()">确定</button>
       <button onclick="closeGroupModal()">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 编辑分组：重命名 / 删除 -->
+<div class="modal-overlay" id="editGroupsModal">
+  <div class="modal" style="width:min(480px,94vw)">
+    <h2>编辑分组</h2>
+    <p class="desc">可重命名或删除已有分组。删除后，该组机器会变为「未分组」。</p>
+    <div id="editGroupsList" class="edit-groups-list">
+      <div class="muted">加载中…</div>
+    </div>
+    <div class="btn-row" style="margin-top:14px">
+      <button type="button" onclick="createGroupPrompt()">新建分组</button>
+      <button class="primary" onclick="closeEditGroupsModal()">完成</button>
     </div>
   </div>
 </div>
@@ -4178,7 +4241,26 @@ function onFilterSortChange() {
   } catch { /* ignore */ }
   renderMachineList();
 }
-function restoreFilterSortPrefs() {
+
+/** 统一恢复看板展示偏好（下次登录沿用） */
+function restoreAllUiPrefs() {
+  // 主题
+  try { renderThemeUI(); } catch {}
+  // 图表模式 / 跨度
+  try { loadChartPrefs(); } catch {}
+  try {
+    const rx = document.getElementById("chkRx");
+    const tx = document.getElementById("chkTx");
+    if (rx) rx.checked = localStorage.getItem("dash_chart_rx") !== "0";
+    if (tx) tx.checked = localStorage.getItem("dash_chart_tx") !== "0";
+  } catch { /* ignore */ }
+  try {
+    document.querySelectorAll("#modeSeg button").forEach(b => {
+      b.classList.toggle("active", b.dataset.mode === chartMode);
+    });
+    fillRangeOptions(document.getElementById("range"), chartMode);
+  } catch { /* ignore */ }
+  // 筛选 / 排序 / 列表模式 / 排行日切
   try {
     const fo = document.getElementById("filterOnline");
     const sel = document.getElementById("sortBy");
@@ -4190,15 +4272,30 @@ function restoreFilterSortPrefs() {
     }
     filterGroup = localStorage.getItem("dash_filter_group") || "";
     listViewMode = localStorage.getItem("dash_list_view") === "card" ? "card" : "table";
-  } catch { /* ignore */ }
-  applyListViewMode();
-  fillGroupFilterOptions();
-  try {
     rankMode = localStorage.getItem("dash_rank_mode") === "month" ? "month" : "today";
     document.querySelectorAll("#rankSeg button").forEach((b) => {
       b.classList.toggle("active", b.dataset.rank === rankMode);
     });
-  } catch {}
+  } catch { /* ignore */ }
+  try { applyListViewMode(); } catch {}
+  try { fillGroupFilterOptions(); } catch {}
+  // 入站 / 总流量 / 排行 显示开关
+  try { restoreShowInbound(); } catch {}
+  try { restoreChartPanelVisible(); } catch {}
+  // 登录日志每页条数
+  try {
+    const saved = Number(localStorage.getItem("dash_logs_page_size") || 0);
+    if (saved === 10 || saved === 20 || saved === 50 || saved === 100) {
+      logsPageSize = saved;
+      const sel = document.getElementById("logsPageSize");
+      if (sel) sel.value = String(saved);
+    }
+  } catch { /* ignore */ }
+}
+
+function restoreFilterSortPrefs() {
+  // 兼容旧调用：转发到统一恢复
+  restoreAllUiPrefs();
 }
 function machineView() {
   let arr = machines.slice();
@@ -4224,16 +4321,30 @@ function machineView() {
 function fillGroupFilterOptions() {
   const fg = document.getElementById("filterGroup");
   if (!fg) return;
-  const cur = filterGroup || fg.value || "";
+  // 优先用内存偏好；不要因 groups 尚未加载而把偏好清掉
+  let cur = filterGroup;
+  try {
+    if (cur === "" || cur == null) cur = localStorage.getItem("dash_filter_group") || "";
+  } catch { /* ignore */ }
+  if (cur == null) cur = "";
+  filterGroup = cur;
   fg.replaceChildren();
   const opts = [["", "全部分组"], ["__none__", "未分组"], ...groupNames.map((g) => [g, g])];
+  // 偏好里的分组若暂不在列表，仍插入一项，避免被重置
+  if (cur && cur !== "__none__" && !opts.some((x) => x[0] === cur)) {
+    opts.push([cur, cur + "（已保存）"]);
+  }
   for (const [v, t] of opts) {
     const o = document.createElement("option");
     o.value = v; o.textContent = t;
     fg.appendChild(o);
   }
-  if (opts.some((x) => x[0] === cur)) fg.value = cur;
-  else { fg.value = ""; filterGroup = ""; }
+  fg.value = opts.some((x) => x[0] === cur) ? cur : "";
+  // 仅当用户选了不存在且非保存项时才清空；这里保留 cur
+  if (fg.value !== cur && cur) {
+    // 仍强制选中已保存分组
+    try { fg.value = cur; } catch { /* ignore */ }
+  }
 }
 
 function setListViewMode(mode) {
@@ -4646,6 +4757,143 @@ function closeGroupModal() {
   _groupModal = { mode: "one", ids: [] };
 }
 
+function openEditGroupsModal() {
+  renderEditGroupsList();
+  const el = document.getElementById("editGroupsModal");
+  if (el) el.classList.add("open");
+}
+
+function closeEditGroupsModal() {
+  const el = document.getElementById("editGroupsModal");
+  if (el) el.classList.remove("open");
+}
+
+function countMachinesInGroup(name) {
+  const g = String(name || "").trim();
+  if (!g) return 0;
+  return (machines || []).filter((m) => String(m.group_name || "").trim() === g).length;
+}
+
+function renderEditGroupsList() {
+  const box = document.getElementById("editGroupsList");
+  if (!box) return;
+  box.replaceChildren();
+  if (!groupNames.length) {
+    const empty = document.createElement("div");
+    empty.className = "muted";
+    empty.style.padding = "8px 0";
+    empty.textContent = "暂无分组。可点下方「新建分组」。";
+    box.appendChild(empty);
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const g of groupNames) {
+    const row = document.createElement("div");
+    row.className = "edit-group-row";
+    row.dataset.group = g;
+
+    const nameEl = document.createElement("div");
+    nameEl.className = "eg-name";
+    nameEl.textContent = g;
+    nameEl.title = g;
+
+    const meta = document.createElement("div");
+    meta.className = "eg-meta muted";
+    meta.textContent = countMachinesInGroup(g) + " 台";
+
+    const actions = document.createElement("div");
+    actions.className = "eg-actions";
+    const btnRen = document.createElement("button");
+    btnRen.type = "button";
+    btnRen.className = "sm";
+    btnRen.textContent = "重命名";
+    btnRen.addEventListener("click", (e) => {
+      e.stopPropagation();
+      renameGroupPrompt(g);
+    });
+    const btnDel = document.createElement("button");
+    btnDel.type = "button";
+    btnDel.className = "sm danger";
+    btnDel.textContent = "删除";
+    btnDel.addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteGroupPrompt(g);
+    });
+    actions.appendChild(btnRen);
+    actions.appendChild(btnDel);
+
+    row.appendChild(nameEl);
+    row.appendChild(meta);
+    row.appendChild(actions);
+    frag.appendChild(row);
+  }
+  box.appendChild(frag);
+}
+
+async function renameGroupPrompt(oldName) {
+  const from = String(oldName || "").trim();
+  if (!from) return;
+  const name = prompt("将分组「" + from + "」重命名为：", from);
+  if (name == null) return;
+  const to = String(name).trim().slice(0, 40);
+  if (!to) { toast("新分组名不能为空"); return; }
+  if (to === from) { toast("名称未变化"); return; }
+  try {
+    const data = await api("/api/groups/rename", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ old_name: from, new_name: to }),
+    });
+    if (!data || !data.ok) { toast((data && data.error) || "重命名失败"); return; }
+    groupNames = data.groups || groupNames.map((x) => (x === from ? to : x));
+    for (const m of machines) {
+      if (String(m.group_name || "").trim() === from) m.group_name = to;
+    }
+    if (filterGroup === from) {
+      filterGroup = to;
+      try { localStorage.setItem("dash_filter_group", to); } catch {}
+    }
+    fillGroupFilterOptions();
+    renderEditGroupsList();
+    renderMachineList();
+    toast("已重命名：「" + from + "」→「" + to + "」" + (data.machines_updated ? (" · 机器 " + data.machines_updated + " 台") : ""));
+  } catch (e) {
+    toast("重命名失败：" + (e && e.message ? e.message : e));
+  }
+}
+
+async function deleteGroupPrompt(name) {
+  const g = String(name || "").trim();
+  if (!g) return;
+  const n = countMachinesInGroup(g);
+  const msg = n > 0
+    ? ("删除分组「" + g + "」？组内 " + n + " 台将变为未分组。")
+    : ("删除分组「" + g + "」？");
+  if (!confirm(msg)) return;
+  try {
+    const data = await api("/api/groups/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: g }),
+    });
+    if (!data || !data.ok) { toast((data && data.error) || "删除失败"); return; }
+    groupNames = data.groups || groupNames.filter((x) => x !== g);
+    for (const m of machines) {
+      if (String(m.group_name || "").trim() === g) m.group_name = "";
+    }
+    if (filterGroup === g) {
+      filterGroup = "";
+      try { localStorage.setItem("dash_filter_group", ""); } catch {}
+    }
+    fillGroupFilterOptions();
+    renderEditGroupsList();
+    renderMachineList();
+    toast("已删除分组「" + g + "」" + (data.machines_cleared ? (" · 清空 " + data.machines_cleared + " 台") : ""));
+  } catch (e) {
+    toast("删除失败：" + (e && e.message ? e.message : e));
+  }
+}
+
 function resolveGroupModalName() {
   const sel = document.getElementById("grpSelect");
   const custom = document.getElementById("grpCustom");
@@ -4672,6 +4920,8 @@ async function confirmGroupModal() {
       if (!data || !data.ok) { toast((data && data.error) || "创建失败"); return; }
       groupNames = data.groups || groupNames;
       fillGroupFilterOptions();
+      // 若编辑分组窗开着，同步刷新列表
+      try { if (document.getElementById("editGroupsModal")?.classList.contains("open")) renderEditGroupsList(); } catch {}
       closeGroupModal();
       toast("已创建分组：" + name);
     } catch (e) {
@@ -4809,6 +5059,14 @@ function setChartMode(mode) {
     b.classList.toggle("active", b.dataset.mode === chartMode);
   });
   fillRangeOptions(document.getElementById("range"), chartMode);
+  saveChartPrefs();
+  loadHistory();
+}
+function onChartSeriesChange() {
+  saveChartPrefs();
+  renderMainChart();
+}
+function onChartRangeChange() {
   saveChartPrefs();
   loadHistory();
 }
@@ -5261,8 +5519,16 @@ function setShowInbound(on) {
   try {
     const rx = document.getElementById("chkRx");
     const hrx = document.getElementById("histChkRx");
-    if (rx) { rx.checked = !!on; rx.disabled = !on; }
-    if (hrx) { hrx.checked = !!on; hrx.disabled = !on; }
+    if (!on) {
+      if (rx) { rx.checked = false; rx.disabled = true; }
+      if (hrx) { hrx.checked = false; hrx.disabled = true; }
+    } else {
+      // 恢复图表入站勾选偏好，不强制全开
+      let preferRx = true;
+      try { preferRx = localStorage.getItem("dash_chart_rx") !== "0"; } catch {}
+      if (rx) { rx.disabled = false; rx.checked = preferRx; }
+      if (hrx) { hrx.disabled = false; hrx.checked = preferRx; }
+    }
   } catch {}
   try { renderSummary(); } catch {}
   try { renderMachineList(); } catch {}
@@ -5277,8 +5543,22 @@ function restoreShowInbound() {
   try {
     const rx = document.getElementById("chkRx");
     const hrx = document.getElementById("histChkRx");
-    if (rx) { rx.checked = on; rx.disabled = !on; }
-    if (hrx) { hrx.checked = on; hrx.disabled = !on; }
+    if (!on) {
+      if (rx) { rx.checked = false; rx.disabled = true; }
+      if (hrx) { hrx.checked = false; hrx.disabled = true; }
+    } else {
+      let preferRx = true, preferTx = true;
+      try {
+        preferRx = localStorage.getItem("dash_chart_rx") !== "0";
+        preferTx = localStorage.getItem("dash_chart_tx") !== "0";
+      } catch {}
+      if (rx) { rx.disabled = false; rx.checked = preferRx; }
+      if (hrx) { hrx.disabled = false; hrx.checked = preferRx; }
+      const tx = document.getElementById("chkTx");
+      const htx = document.getElementById("histChkTx");
+      if (tx) tx.checked = preferTx;
+      if (htx) htx.checked = preferTx;
+    }
   } catch {}
 }
 
@@ -5455,6 +5735,8 @@ async function refresh(opts = {}) {
 
       machines = (machData && machData.machines) || [];
       if (Array.isArray(machData && machData.groups)) groupNames = machData.groups;
+      // 重新填充分组下拉，并保留 localStorage 中的筛选偏好
+      try { filterGroup = localStorage.getItem("dash_filter_group") || filterGroup || ""; } catch {}
       fillGroupFilterOptions();
       if (selected && !machines.find(m => m.machine_id === selected)) selected = null;
       renderSummary();
@@ -6506,6 +6788,9 @@ document.getElementById("forceResultModal").addEventListener("click", e => {
 document.getElementById("groupModal").addEventListener("click", e => {
   if (e.target === e.currentTarget) closeGroupModal();
 });
+document.getElementById("editGroupsModal").addEventListener("click", e => {
+  if (e.target === e.currentTarget) closeEditGroupsModal();
+});
 document.getElementById("grpCustom").addEventListener("keydown", e => {
   if (e.key === "Enter") confirmGroupModal();
 });
@@ -6513,23 +6798,8 @@ document.getElementById("vpsMid").addEventListener("keydown", e => {
   if (e.key === "Enter") genCmd();
 });
 
-renderThemeUI();
-loadChartPrefs();
-restoreFilterSortPrefs();
-restoreShowInbound();
-restoreChartPanelVisible();
-// 恢复勾选
-try {
-  const rx = document.getElementById("chkRx");
-  const tx = document.getElementById("chkTx");
-  if (localStorage.getItem("dash_chart_rx") === "0") rx.checked = false;
-  if (localStorage.getItem("dash_chart_tx") === "0") tx.checked = false;
-} catch { /* ignore */ }
-// 高亮恢复的 mode 按钮
-document.querySelectorAll("#modeSeg button").forEach(b => {
-  b.classList.toggle("active", b.dataset.mode === chartMode);
-});
-fillRangeOptions(document.getElementById("range"), chartMode);
+// 一次性恢复所有展示偏好（主题/筛选/排序/视图/图表/开关）
+restoreAllUiPrefs();
 tickDashClock();
 setInterval(tickDashClock, 1000);
 refresh();
@@ -6701,6 +6971,32 @@ export default {
       if (!names.includes(name)) names.push(name);
       const groups = await saveGroupNames(env, names);
       return json({ ok: true, groups, created: name });
+    }
+
+    // POST /api/groups/rename — { old_name, new_name }
+    if (req.method === "POST" && url.pathname === "/api/groups/rename") {
+      if (!env.DB) return json({ ok: false, error: missingDbError(env) }, 500);
+      let body = {};
+      try { body = await req.json(); } catch { body = {}; }
+      try {
+        const r = await renameGroup(env, body.old_name || body.from, body.new_name || body.to);
+        return json(r, r.ok ? 200 : 400);
+      } catch (e) {
+        return json({ ok: false, error: String(e && e.message ? e.message : e) }, 500);
+      }
+    }
+
+    // POST /api/groups/delete — { name }
+    if (req.method === "POST" && (url.pathname === "/api/groups/delete" || url.pathname === "/api/groups/remove")) {
+      if (!env.DB) return json({ ok: false, error: missingDbError(env) }, 500);
+      let body = {};
+      try { body = await req.json(); } catch { body = {}; }
+      try {
+        const r = await deleteGroup(env, body.name || body.group || body.group_name);
+        return json(r, r.ok ? 200 : 400);
+      } catch (e) {
+        return json({ ok: false, error: String(e && e.message ? e.message : e) }, 500);
+      }
     }
 
     // POST /api/machines/set-group — { machine_ids:[], group_name }
