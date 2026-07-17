@@ -526,14 +526,15 @@ function shanghaiHourLabelOffset(i) {
 }
 
 /**
- * 日内小时折线：近 span 小时内，各整点「该小时新增流量」
- *  - 用 snapshot 的 today_rx/tx 累计值差分（跨自然日重置时不减前一日）
+ * 日内折线：近 span 小时内，各整点「当日累计用量」(today_rx/tx)
+ *  - 线只升不平降（同日累计）；跨自然日会从新一天的累计重新起
  *  - mid 空 = 全部机器求和
+ *  - 无数据的小时向前填充上一个已知累计，避免断崖乱跳
  */
 async function getHistoryHourly(env, { mid, span }) {
   const n = Math.min(72, Math.max(6, Number(span) || 24));
   const now = Math.floor(Date.now() / 1000);
-  const since = now - n * 3600 - 3600; // 多取 1h 便于首点差分
+  const since = now - n * 3600 - 3600; // 多取 1h 便于跨边界对齐
 
   let sql = `SELECT machine_id, ts, today_rx, today_tx
              FROM snapshots WHERE ts >= ?`;
@@ -546,7 +547,7 @@ async function getHistoryHourly(env, { mid, span }) {
   const { results } = await env.DB.prepare(sql).bind(...binds).all();
   const rows = results || [];
 
-  // 每机每小时取最后一条累计值
+  // 每机每小时取最后一条「当日累计」
   const lastByHourMid = new Map(); // hour|mid -> {hour, mid, day, rx, tx}
   for (const r of rows) {
     const ts = Number(r.ts) || 0;
@@ -560,50 +561,78 @@ async function getHistoryHourly(env, { mid, span }) {
     });
   }
 
-  // 按机分组，按小时排序后差分
-  const byMid = new Map();
-  for (const v of lastByHourMid.values()) {
-    if (!byMid.has(v.mid)) byMid.set(v.mid, []);
-    byMid.get(v.mid).push(v);
-  }
-  const deltaByHour = new Map(); // hour -> {rx, tx}
-  for (const list of byMid.values()) {
-    list.sort((a, b) => (a.hour < b.hour ? -1 : a.hour > b.hour ? 1 : 0));
-    let prev = null;
-    for (const cur of list) {
-      let drx = cur.rx, dtx = cur.tx;
-      if (prev && prev.day === cur.day) {
-        drx = Math.max(0, cur.rx - prev.rx);
-        dtx = Math.max(0, cur.tx - prev.tx);
-      }
-      // 跨日：首点用累计本身（即当天截至该小时的量）；若同日多点则差分
-      // 若跨日且 prev 存在：用 cur 累计（从 0 起的今日量），合理
-      if (prev && prev.day !== cur.day) {
-        drx = Math.max(0, cur.rx);
-        dtx = Math.max(0, cur.tx);
-      }
-      if (!prev) {
-        // 序列第一点：无前值，无法可靠估「本小时增量」，记 0 避免把全天累计当小时增量
-        drx = 0;
-        dtx = 0;
-      }
-      const acc = deltaByHour.get(cur.hour) || { rx: 0, tx: 0 };
-      acc.rx += drx;
-      acc.tx += dtx;
-      deltaByHour.set(cur.hour, acc);
-      prev = cur;
-    }
-  }
-
   // 时间轴：近 n 小时（含当前小时）
   const labels = [];
   for (let i = n - 1; i >= 0; i--) labels.push(shanghaiHourLabelOffset(i));
 
+  // 按机：把稀疏小时点对齐到完整 labels，同日内向前填充累计，保证不降
+  const machineIds = new Set();
+  for (const v of lastByHourMid.values()) machineIds.add(v.mid);
+
+  const totalByHour = new Map(); // hour -> {rx, tx}
+  for (const lab of labels) totalByHour.set(lab, { rx: 0, tx: 0 });
+
+  for (const mId of machineIds) {
+    // 该机在 labels 上的累计序列
+    let lastRx = 0, lastTx = 0, lastDay = "";
+    for (const lab of labels) {
+      const hit = lastByHourMid.get(lab + "|" + mId);
+      const day = lab.slice(0, 10); // YYYY-MM-DD
+      if (hit) {
+        if (lastDay && hit.day !== lastDay) {
+          // 跨日：从新一天累计重新起（可从较小值开始，这是自然日重置，不是抖动）
+          lastRx = Math.max(0, hit.rx);
+          lastTx = Math.max(0, hit.tx);
+        } else {
+          // 同日：累计只增不减
+          lastRx = Math.max(lastRx, hit.rx);
+          lastTx = Math.max(lastTx, hit.tx);
+        }
+        lastDay = hit.day;
+      } else if (lastDay && day !== lastDay) {
+        // 无点且已跨日：新一天尚未有数据，记 0
+        lastRx = 0;
+        lastTx = 0;
+        lastDay = day;
+      } else if (!lastDay) {
+        lastDay = day;
+      }
+      // 无 hit 且同日：沿用 lastRx/lastTx（前向填充）
+      const acc = totalByHour.get(lab);
+      acc.rx += lastRx;
+      acc.tx += lastTx;
+    }
+  }
+
+  // 叠加 machines 表「当前今日累计」到最后一个桶，保证与列表今日一致
+  try {
+    let liveSql = `SELECT machine_id, today_rx, today_tx, last_ts FROM machines`;
+    const liveBinds = [];
+    if (mid) {
+      liveSql += ` WHERE machine_id = ?`;
+      liveBinds.push(mid);
+    }
+    const live = liveBinds.length
+      ? await env.DB.prepare(liveSql).bind(...liveBinds).all()
+      : await env.DB.prepare(liveSql).all();
+    const lastLab = labels[labels.length - 1];
+    if (lastLab) {
+      let rx = 0, tx = 0;
+      for (const r of live.results || []) {
+        rx += Number(r.today_rx) || 0;
+        tx += Number(r.today_tx) || 0;
+      }
+      // 用 live 覆盖最后一桶的合计（更贴近实时）
+      const prev = totalByHour.get(lastLab) || { rx: 0, tx: 0 };
+      totalByHour.set(lastLab, { rx: Math.max(prev.rx, rx), tx: Math.max(prev.tx, tx) });
+    }
+  } catch { /* ignore */ }
+
   const points = labels.map((bucket) => {
-    const v = deltaByHour.get(bucket) || { rx: 0, tx: 0 };
+    const v = totalByHour.get(bucket) || { rx: 0, tx: 0 };
     return { bucket, rx: v.rx, tx: v.tx, total: v.rx + v.tx };
   });
-  return { mode: "hour", span: n, machine_id: mid || null, points };
+  return { mode: "hour", span: n, machine_id: mid || null, points, series: "cumulative_today" };
 }
 
 /** 日/月聚合：单机 mid 或全部（mid 空）。
@@ -1890,19 +1919,19 @@ html[data-theme="cyber"]{
   --rx-fill:rgba(34,211,238,.14); --tx-fill:rgba(232,121,249,.12);
   --grid:#16304f; --glow:rgba(34,211,238,.22); --header-glow:linear-gradient(90deg,rgba(34,211,238,.08),rgba(232,121,249,.08));
 }
-/* 炫酷黑：更深哑光，降低整体亮度 */
+/* 墨夜：极哑光深灰黑，几乎无反光 */
 html[data-theme="noir"]{
   color-scheme:dark;
-  --bg:#06070a; --bg2:#0a0c10; --panel:#0f1218; --panel2:#0c0e14;
-  --line:#1c212b; --line2:#161a22; --border:#2a3140;
-  --text:#d7dde8; --muted:#8b93a3; --label:#aeb6c5;
-  --hover:#151a24; --accent:#4fb6db; --accent2:#3a9fc4;
-  --ok:#2fbf8a; --ok2:#249e72; --warn:#e0a82e; --danger:#e06b6b; --danger2:#c95555;
-  --badge-bg:#141a26; --badge-fg:#9fd4ea; --badge-off-bg:#2e1416; --badge-off-fg:#e8a0a0;
-  --rx:#4fb6db; --tx:#7f91d8; --rx-soft:rgba(79,182,219,.88); --tx-soft:rgba(127,145,216,.86);
-  --rx-fill:rgba(79,182,219,.11); --tx-fill:rgba(127,145,216,.10);
-  --grid:#1a1f29; --glow:rgba(0,0,0,.35); --header-glow:none;
-  --body-bg:#06070a;
+  --bg:#050608; --bg2:#090b0f; --panel:#0c0e13; --panel2:#080a0e;
+  --line:#1a1e26; --line2:#14181f; --border:#252a34;
+  --text:#cfd5e0; --muted:#7f8796; --label:#9aa3b2;
+  --hover:#12161e; --accent:#3d8fb0; --accent2:#347a97;
+  --ok:#2aa878; --ok2:#228a68; --warn:#b8861a; --danger:#c45c5c; --danger2:#a84c4c;
+  --badge-bg:#121720; --badge-fg:#8ebfd4; --badge-off-bg:#281416; --badge-off-fg:#d09090;
+  --rx:#3d8fb0; --tx:#6b7ab8; --rx-soft:rgba(61,143,176,.85); --tx-soft:rgba(107,122,184,.82);
+  --rx-fill:rgba(61,143,176,.10); --tx-fill:rgba(107,122,184,.09);
+  --grid:#151922; --glow:transparent; --header-glow:none;
+  --body-bg:#050608;
 }
 /* 透明玻璃：深空渐变底 + 毛玻璃面板 */
 html[data-theme="glass"]{
@@ -1925,15 +1954,15 @@ html[data-theme="paper"]{
   --bg:#e6eef8; --bg2:#edf3fb; --panel:#f3f7fc; --panel2:#e8eef8;
   --line:#cfdced; --line2:#dbe5f2; --border:#bfcee4;
   --text:#1e2a3a; --muted:#5b6b80; --label:#3f5168;
-  --hover:#dfe9f6; --accent:#3b6fd4; --accent2:#2f5fbe;
-  --ok:#0f766e; --ok2:#0d9488; --warn:#b45309; --danger:#b91c1c; --danger2:#991b1b;
-  --badge-bg:#d9e6f8; --badge-fg:#1e4d8c; --badge-off-bg:#f3d6d6; --badge-off-fg:#9f1239;
-  --rx:#3b6fd4; --tx:#2a8f9a; --rx-soft:rgba(59,111,212,.88); --tx-soft:rgba(42,143,154,.88);
-  --rx-fill:rgba(59,111,212,.12); --tx-fill:rgba(42,143,154,.12);
+  --hover:#d9e7f7; --accent:#3b82f6; --accent2:#2563eb;
+  --ok:#059669; --ok2:#047857; --warn:#d97706; --danger:#dc2626; --danger2:#b91c1c;
+  --badge-bg:#dbeafe; --badge-fg:#1d4ed8; --badge-off-bg:#fee2e2; --badge-off-fg:#b91c1c;
+  --rx:#3b82f6; --tx:#14b8a6; --rx-soft:rgba(59,130,246,.9); --tx-soft:rgba(20,184,166,.88);
+  --rx-fill:rgba(59,130,246,.12); --tx-fill:rgba(20,184,166,.12);
   --grid:#d3e0ef; --glow:rgba(59,111,212,.08); --header-glow:linear-gradient(90deg,rgba(59,111,212,.06),transparent);
   --body-bg:linear-gradient(180deg,#e3ecf7 0%,#eaf1f9 50%,#e6eef8 100%);
 }
-/* 草原绿：首版柔雾浅绿 + 森林强调 */
+/* 原谅色（prairie）：柔雾浅绿 + 森林强调 */
 html[data-theme="prairie"]{
   color-scheme:light;
   --bg:#f3f7f1; --bg2:#f8fbf6; --panel:#ffffff; --panel2:#eef5ea;
@@ -2056,34 +2085,41 @@ html[data-theme="glass"] .theme-switch select option{
   background:#f8fafc !important;
 }
 
-/* 炫酷黑：哑光灰黑表面 + 当前冷青按钮 */
+/* 墨夜：哑光控件，无渐变高光 */
 html[data-theme="noir"] button.primary,
 html[data-theme="noir"] .seg button.active{
-  background:#3f9fc4;
-  border:1px solid #4fb6db;
-  color:#061018;
-  font-weight:700;
+  background:#2f6f8a;
+  border:1px solid #3d8fb0;
+  color:#e8f4fa;
+  font-weight:600;
   box-shadow:none;
+  text-shadow:none;
+  filter:none;
 }
-html[data-theme="noir"] button.primary:hover{background:#4fb6db;border-color:#7ecae6;color:#061018}
-html[data-theme="noir"] button.green{background:#2fbf8a;border-color:#4fd4a4;color:#041812;font-weight:700;box-shadow:none}
-html[data-theme="noir"] button.warn{background:#c9921f;border-color:#e0a82e;color:#1a1203;font-weight:700;box-shadow:none}
-html[data-theme="noir"] button.danger{background:#c95555;border-color:#e06b6b;color:#1a0808;font-weight:700;box-shadow:none}
+html[data-theme="noir"] button.primary:hover{background:#3d8fb0;border-color:#4fa3c4;color:#f2f9fc}
+html[data-theme="noir"] button.green{background:#247a58;border-color:#2aa878;color:#e8faf2;font-weight:600;box-shadow:none}
+html[data-theme="noir"] button.warn{background:#8a6a14;border-color:#b8861a;color:#faf3e0;font-weight:600;box-shadow:none}
+html[data-theme="noir"] button.danger{background:#8f3f3f;border-color:#c45c5c;color:#faeaea;font-weight:600;box-shadow:none}
 html[data-theme="noir"] button:not(.primary):not(.green):not(.warn):not(.danger),
 html[data-theme="noir"] select,
 html[data-theme="noir"] .settings-form input,
 html[data-theme="noir"] .settings-form select,
 html[data-theme="noir"] .settings-form textarea,
 html[data-theme="noir"] textarea,
-html[data-theme="noir"] .seg button{
-  background:#10141c;
-  border-color:#2a3140;
+html[data-theme="noir"] .seg button,
+html[data-theme="noir"] .section-note,
+html[data-theme="noir"] .tpl-help,
+html[data-theme="noir"] .tpl-preview,
+html[data-theme="noir"] .clock{
+  background:#0c0e13;
+  border-color:#252a34;
   color:var(--text);
   box-shadow:none;
+  filter:none;
 }
-html[data-theme="noir"] .seg button.active{background:#3f9fc4;border-color:#4fb6db;color:#061018}
-html[data-theme="noir"] header{background:#0a0c10;border-bottom-color:#1c212b;box-shadow:none}
-html[data-theme="noir"] .card .val{letter-spacing:.3px}
+html[data-theme="noir"] .seg button.active{background:#2f6f8a;border-color:#3d8fb0;color:#e8f4fa}
+html[data-theme="noir"] header{background:#090b0f;border-bottom-color:#1a1e26;box-shadow:none}
+html[data-theme="noir"] .card .val{letter-spacing:.2px;text-shadow:none}
 html[data-theme="paper"] body,
 html[data-theme="paper"]{/* soft paper */}
 html[data-theme="paper"] header{background:#eaf1f9;border-bottom-color:#cfdced}
@@ -2091,13 +2127,32 @@ html[data-theme="paper"] .card,
 html[data-theme="paper"] .panel,
 html[data-theme="paper"] .settings-card{background:#f3f7fc;border-color:#cfdced}
 html[data-theme="paper"] select,
-html[data-theme="paper"] button,
+html[data-theme="paper"] button:not(.primary):not(.green):not(.warn):not(.danger),
 html[data-theme="paper"] .settings-form input,
 html[data-theme="paper"] .settings-form select,
 html[data-theme="paper"] .settings-form textarea,
 html[data-theme="paper"] textarea{background:#e8eef8;border-color:#bfcee4;color:#1e2a3a}
-html[data-theme="paper"] .seg button{background:#e0e9f5;color:#3f5168}
-html[data-theme="paper"] .seg button.active{background:#3b6fd4;color:#fff}
+html[data-theme="paper"] .seg button{background:#e0e9f5;color:#3f5168;border-color:#bfcee4}
+html[data-theme="paper"] .seg button.active{background:#3b82f6;border-color:#2563eb;color:#fff;font-weight:700}
+/* 雾蓝白按钮：实心清晰，避免灰蓝发脏 */
+html[data-theme="paper"] button.primary{
+  background:#3b82f6; border:1px solid #2563eb; color:#ffffff; font-weight:700;
+  box-shadow:0 1px 2px rgba(37,99,235,.18);
+}
+html[data-theme="paper"] button.primary:hover{background:#2563eb;border-color:#1d4ed8;color:#fff}
+html[data-theme="paper"] button.green{
+  background:#10b981; border:1px solid #059669; color:#ffffff; font-weight:700;
+}
+html[data-theme="paper"] button.green:hover{background:#059669;border-color:#047857}
+html[data-theme="paper"] button.warn{
+  background:#f59e0b; border:1px solid #d97706; color:#1f1403; font-weight:700;
+}
+html[data-theme="paper"] button.warn:hover{background:#d97706;border-color:#b45309;color:#fff}
+html[data-theme="paper"] button.danger{
+  background:#ef4444; border:1px solid #dc2626; color:#ffffff; font-weight:700;
+}
+html[data-theme="paper"] button.danger:hover{background:#dc2626;border-color:#b91c1c}
+
 html[data-theme="paper"] button.warn,
 html[data-theme="prairie"] button.warn{color:#111}
 html[data-theme="paper"] .card,
@@ -2110,10 +2165,28 @@ html[data-theme="prairie"] .settings-card{
 }
 html[data-theme="noir"] .card,
 html[data-theme="noir"] .panel,
-html[data-theme="noir"] .settings-card{
-  box-shadow:0 1px 0 rgba(255,255,255,.02),0 6px 16px rgba(0,0,0,.35);
-  background:#0f1218;
+html[data-theme="noir"] .settings-card,
+html[data-theme="noir"] .modal,
+html[data-theme="noir"] .batch-bar{
+  box-shadow:none;
+  background:#0c0e13;
+  border-color:#1a1e26;
 }
+html[data-theme="noir"] .theme-opt{
+  box-shadow:none;
+  background:#0a0c10;
+  border-color:#1c212b;
+}
+html[data-theme="noir"] .theme-opt.active{
+  box-shadow:none;
+  border-color:#3d8fb0;
+}
+html[data-theme="noir"] .toast{
+  box-shadow:none;
+  background:#10141c;
+  border-color:#252a34;
+}
+
 html[data-theme="prairie"] button.primary{color:#fff}
 html[data-theme="crimson"] button.primary,
 html[data-theme="crimson"] .seg button.active{
@@ -2140,7 +2213,6 @@ html[data-theme="crimson"] .settings-card{
   background:#221316; box-shadow:0 1px 0 rgba(255,255,255,.03),0 8px 22px rgba(0,0,0,.35);
 }
 
-html[data-theme="paper"] button.primary{color:#fff}
 
 header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--line2);background:var(--bg2);background-image:var(--header-glow)}
 header h1{font-size:18px;margin:0;letter-spacing:.2px}
@@ -2303,9 +2375,9 @@ textarea:focus{border-color:var(--accent)}
 .theme-opt .desc{font-size:11px;color:var(--muted);margin-top:2px;line-height:1.4}
 .theme-opt[data-id="default"]{--sw1:#0b1220;--sw2:#3b82f6;--sw3:#34d399}
 .theme-opt[data-id="cyber"]{--sw1:#070b14;--sw2:#22d3ee;--sw3:#e879f9}
-.theme-opt[data-id="noir"]{--sw1:#06070a;--sw2:#4fb6db;--sw3:#1c212b}
+.theme-opt[data-id="noir"]{--sw1:#050608;--sw2:#3d8fb0;--sw3:#1a1e26}
 .theme-opt[data-id="glass"]{--sw1:#0a1024;--sw2:#7dd3fc;--sw3:#a5b4fc}
-.theme-opt[data-id="paper"]{--sw1:#e6eef8;--sw2:#3b6fd4;--sw3:#2a8f9a}
+.theme-opt[data-id="paper"]{--sw1:#e6eef8;--sw2:#3b82f6;--sw3:#14b8a6}
 .theme-opt[data-id="prairie"]{--sw1:#f3f7f1;--sw2:#3f7d4e;--sw3:#6b9e6f}
 .theme-opt[data-id="crimson"]{--sw1:#12090b;--sw2:#c45c6a;--sw3:#4a2c34}
 </style>
@@ -2456,7 +2528,7 @@ textarea:focus{border-color:var(--accent)}
             <h3>界面主题</h3>
             <span class="tag">本地记忆</span>
           </div>
-          <p class="section-note">当前为默认主题，另有 5 套科技感主题。选择后立即生效，保存在本机浏览器，不消耗 CF 调用。</p>
+          <p class="section-note">默认主题为「原谅色」。另有极夜蓝、霓虹赛博、墨夜、琉璃、雾蓝白、绛夜。选择后立即生效，保存在本机浏览器。</p>
           <div class="theme-grid" id="themeGrid"></div>
         </div>
 
@@ -2711,7 +2783,7 @@ let histMid = null;
  *  周报=按日；月报=按日可选天数；年报=按月；日内=小时折线
  */
 const CHART_PRESETS = {
-  hour:  { api: "hour",  span: 24, chart: "line", title: "日内小时增量", desc: "近 N 小时各整点新增流量（折线）" },
+  hour:  { api: "hour",  span: 24, chart: "line", title: "日内累计", desc: "近 N 小时各整点的当日累计用量（只升不平降；跨日重置）" },
   week:  { api: "day",   span: 7,  chart: "bar",  title: "周报", desc: "按日累计柱状（可选近 7/14 天）" },
   month: { api: "day",   span: 31, chart: "bar",  title: "月报", desc: "按日累计柱状（最长近 31 天）" },
   year:  { api: "month", span: 12, chart: "bar",  title: "年报", desc: "按月累计柱状（可选近 6/12/24 月）" },
@@ -3140,7 +3212,7 @@ const valueLabelPlugin = {
   },
 };
 
-/** 折线：日内小时增量（入/出分色） */
+/** 折线：日内当日累计（入/出分色；同日只升/持平） */
 function buildLineChart(canvas, points, opts) {
   const showRx = opts.showRx !== false;
   const showTx = opts.showTx !== false;
@@ -3159,7 +3231,7 @@ function buildLineChart(canvas, points, opts) {
   const tc = themeChartColors();
   if (showRx) {
     datasets.push({
-      label: "入站 GB/时",
+      label: "入站累计 GB",
       data: rx,
       borderColor: tc.rx,
       backgroundColor: tc.rxFill,
@@ -3172,7 +3244,7 @@ function buildLineChart(canvas, points, opts) {
   }
   if (showTx) {
     datasets.push({
-      label: "出站 GB/时",
+      label: "出站累计 GB",
       data: tx,
       borderColor: tc.tx,
       backgroundColor: tc.txFill,
@@ -3210,7 +3282,7 @@ function buildLineChart(canvas, points, opts) {
           beginAtZero: true,
           ticks: { color: tc.muted },
           grid: { color: tc.grid },
-          title: { display: true, text: "GB / 小时", color: tc.muted },
+          title: { display: true, text: "GB（当日累计）", color: tc.muted },
         },
       },
       plugins: {
@@ -3552,15 +3624,16 @@ async function sendTgSummary() {
 
 // ─── 主题 ───
 const THEMES = [
-  { id:"default", name:"默认", desc:"经典深蓝控制台" },
-  { id:"cyber", name:"赛博霓虹", desc:"青 + 品红霓虹" },
-  { id:"noir", name:"炫酷黑", desc:"更深哑光灰黑" },
-  { id:"glass", name:"透明玻璃", desc:"深空底 + 毛玻璃" },
-  { id:"paper", name:"优雅白", desc:"淡蓝雾感，柔和不刺眼" },
-  { id:"prairie", name:"草原绿", desc:"首版柔雾浅绿" },
-  { id:"crimson", name:"暗夜红", desc:"深酒红 + 暗珊瑚" },
+  { id:"prairie", name:"原谅色", desc:"柔雾浅绿，清新治愈" },
+  { id:"default", name:"极夜蓝", desc:"深蓝控制台" },
+  { id:"cyber", name:"霓虹赛博", desc:"青粉霓虹电光" },
+  { id:"noir", name:"墨夜", desc:"哑光深灰黑" },
+  { id:"glass", name:"琉璃", desc:"深空毛玻璃" },
+  { id:"paper", name:"雾蓝白", desc:"淡蓝纸感浅色" },
+  { id:"crimson", name:"绛夜", desc:"深酒红暗珊瑚" },
 ];
-const THEME_ALIAS = { matrix:"prairie", aurora:"glass", ice:"paper", ember:"noir" };
+const THEME_ALIAS = { matrix:"prairie", aurora:"glass", ice:"paper", ember:"noir", "草原绿":"prairie", "默认":"default" };
+const DEFAULT_THEME_ID = "prairie";
 function cssVar(name, fallback) {
   try {
     const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -3583,7 +3656,7 @@ function themeChartColors() {
 }
 function normalizeTheme(id) {
   const raw = (typeof THEME_ALIAS !== "undefined" && THEME_ALIAS[id]) || id;
-  return THEMES.some(t => t.id === raw) ? raw : "default";
+  return THEMES.some(t => t.id === raw) ? raw : DEFAULT_THEME_ID;
 }
 function setTheme(id, opts) {
   const theme = normalizeTheme(id);
@@ -3617,7 +3690,7 @@ function renderThemeUI() {
       div.dataset.id = t.id;
       const sw = document.createElement("div"); sw.className = "swatch";
       const nm = document.createElement("div"); nm.className = "name";
-      nm.textContent = t.name + (t.id === "default" ? "（默认）" : "");
+      nm.textContent = t.name + (t.id === DEFAULT_THEME_ID ? "（默认）" : "");
       const ds = document.createElement("div"); ds.className = "desc";
       ds.textContent = t.desc;
       div.appendChild(sw); div.appendChild(nm); div.appendChild(ds);
@@ -3625,8 +3698,8 @@ function renderThemeUI() {
       grid.appendChild(div);
     }
   }
-  let saved = "default";
-  try { saved = localStorage.getItem("dash_theme") || "default"; } catch {}
+  let saved = DEFAULT_THEME_ID;
+  try { saved = localStorage.getItem("dash_theme") || DEFAULT_THEME_ID; } catch {}
   setTheme(saved, { redraw: false });
 }
 
