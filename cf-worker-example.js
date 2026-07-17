@@ -3493,6 +3493,7 @@ textarea:focus{border-color:var(--accent)}
     </label>
     <span class="clock" id="dashClock" title="上海时间（浏览器本地计算，不请求服务器）">上海 <b>--</b></span>
     <button class="tg-btn" onclick="sendTgSummary()" id="btnTgSum" title="向 Telegram 发送所有机器汇总">TG 汇总</button>
+    <button type="button" id="btnSavePrefs" onclick="saveUiPrefsToServer()" title="把当前主题/勾选/排序/列表卡片等偏好写入服务器；日常切换只保存在本机浏览器">记录偏好设置</button>
     <form method="post" action="/logout" style="margin:0"><button type="submit">退出</button></form>
   </div>
 </header>
@@ -4431,41 +4432,51 @@ function writeUiPrefsLocal(prefs) {
   } catch { /* ignore */ }
 }
 
-let _uiPrefSaveTimer = null;
-let _uiPrefSaveInflight = false;
+/** 日常只写浏览器缓存；点「记录偏好设置」才写入 D1 */
 function scheduleSaveUiPrefs() {
   try { writeUiPrefsLocal(collectUiPrefs()); } catch {}
-  if (_uiPrefSaveTimer) clearTimeout(_uiPrefSaveTimer);
-  _uiPrefSaveTimer = setTimeout(saveUiPrefsNow, 450);
 }
-async function saveUiPrefsNow() {
-  if (_uiPrefSaveInflight) return;
-  _uiPrefSaveInflight = true;
+async function saveUiPrefsToServer(opts) {
+  const silent = !!(opts && opts.silent);
+  const btn = document.getElementById("btnSavePrefs");
+  if (btn && !silent) {
+    btn.disabled = true;
+    btn.textContent = "保存中…";
+  }
   try {
     const prefs = collectUiPrefs();
     writeUiPrefsLocal(prefs);
-    await api("/api/ui-prefs", {
+    const data = await api("/api/ui-prefs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prefs }),
     });
+    if (!data || !data.ok) {
+      if (!silent) toast((data && data.error) || "偏好保存失败");
+      return false;
+    }
+    if (!silent) toast("偏好已记录到服务器 · 其他浏览器登录可同步");
+    return true;
   } catch (e) {
-    console.log("saveUiPrefs", e);
+    console.log("saveUiPrefsToServer", e);
+    if (!silent) toast("偏好保存失败：" + (e && e.message ? e.message : e));
+    return false;
   } finally {
-    _uiPrefSaveInflight = false;
+    if (btn && !silent) {
+      btn.disabled = false;
+      btn.textContent = "记录偏好设置";
+    }
   }
 }
+// 兼容旧调用名（不再自动写库）
+async function saveUiPrefsNow() { return false; }
 
 async function loadUiPrefsFromServer() {
   try {
     const data = await api("/api/ui-prefs");
     if (!data || !data.ok) return false;
-    // D1 尚无记录：把当前本地偏好上传，不覆盖用户已有本地设置
-    if (!data.exists) {
-      try { await saveUiPrefsNow(); } catch {}
-      return false;
-    }
-    if (!data.prefs) return false;
+    // 没有云端记录：不覆盖本地，也不自动上传
+    if (!data.exists || !data.prefs) return false;
     writeUiPrefsLocal(data.prefs);
     restoreAllUiPrefs();
     return true;
