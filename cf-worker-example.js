@@ -4412,9 +4412,10 @@ function collectUiPrefs() {
 function writeUiPrefsLocal(prefs) {
   if (!prefs || typeof prefs !== "object") return;
   try {
-    if (prefs.theme) {
-      localStorage.setItem("dash_theme", prefs.theme);
-      document.cookie = "dash_theme=" + encodeURIComponent(prefs.theme)
+    const themeId = (prefs && prefs.theme != null) ? String(prefs.theme) : "";
+    if (themeId) {
+      localStorage.setItem("dash_theme", themeId);
+      document.cookie = "dash_theme=" + encodeURIComponent(themeId)
         + "; path=/; max-age=31536000; SameSite=Lax";
     }
     if (prefs.chart_mode) localStorage.setItem("dash_chart_mode", prefs.chart_mode);
@@ -4492,8 +4493,8 @@ async function loadUiPrefsFromServer() {
 }
 
 function restoreAllUiPrefs() {
-  // 主题
-  try { renderThemeUI(); } catch {}
+  // theme
+  try { renderThemeUI(); } catch (e) { console.log("restore theme", e); }
   // 图表模式 / 跨度
   try { loadChartPrefs(); } catch {}
   try {
@@ -6117,50 +6118,77 @@ function themeChartColors() {
   };
 }
 function normalizeTheme(id) {
-  const raw = (typeof THEME_ALIAS !== "undefined" && THEME_ALIAS[id]) || id;
-  return THEMES.some(t => t.id === raw) ? raw : DEFAULT_THEME_ID;
+  // 只接受字符串 id；对象/事件等一律回退默认，避免 undefined.theme
+  let raw = id;
+  if (raw && typeof raw === "object") {
+    if (typeof raw.theme === "string") raw = raw.theme;
+    else if (typeof raw.id === "string") raw = raw.id;
+    else if (typeof raw.value === "string") raw = raw.value;
+    else raw = "";
+  }
+  raw = String(raw == null ? "" : raw).trim();
+  const alias = (typeof THEME_ALIAS !== "undefined" && THEME_ALIAS) ? THEME_ALIAS : {};
+  if (alias[raw]) raw = alias[raw];
+  const list = (typeof THEMES !== "undefined" && Array.isArray(THEMES)) ? THEMES : [];
+  const def = (typeof DEFAULT_THEME_ID === "string" && DEFAULT_THEME_ID) ? DEFAULT_THEME_ID : "prairie";
+  if (list.some((t) => t && t.id === raw)) return raw;
+  return def;
 }
 function setTheme(id, opts) {
+  opts = opts || {};
   const theme = normalizeTheme(id);
-  document.documentElement.setAttribute("data-theme", theme);
+  try { document.documentElement.setAttribute("data-theme", theme); } catch {}
   try { localStorage.setItem("dash_theme", theme); } catch {}
   try {
     document.cookie = "dash_theme=" + encodeURIComponent(theme)
       + "; path=/; max-age=31536000; SameSite=Lax";
   } catch {}
-  try { scheduleSaveUiPrefs(); } catch {}
-  const sel = document.getElementById("themeSelect");
-  if (sel) sel.value = theme;
-  document.querySelectorAll(".theme-opt").forEach(el => {
-    el.classList.toggle("active", el.dataset.id === theme);
-  });
-  if (!opts || opts.redraw !== false) {
+  // 恢复偏好时不要触发保存/收集，避免初始化顺序问题
+  if (!opts.skipSave) {
+    try { scheduleSaveUiPrefs(); } catch {}
+  }
+  try {
+    const sel = document.getElementById("themeSelect");
+    if (sel) sel.value = theme;
+  } catch {}
+  try {
+    document.querySelectorAll(".theme-opt").forEach((el) => {
+      if (!el || !el.dataset) return;
+      el.classList.toggle("active", el.dataset.id === theme);
+    });
+  } catch {}
+  if (opts.redraw !== false) {
     try { if (chartHasData(mainPoints)) renderMainChart(); } catch {}
     try { if (chartHasData(histPoints)) renderHistChart(); } catch {}
     try { renderRankChart(); } catch {}
   }
+  return theme;
 }
 function renderThemeUI() {
+  const list = (typeof THEMES !== "undefined" && Array.isArray(THEMES)) ? THEMES : [];
+  const def = (typeof DEFAULT_THEME_ID === "string" && DEFAULT_THEME_ID) ? DEFAULT_THEME_ID : "prairie";
   const sel = document.getElementById("themeSelect");
   if (sel && !sel.options.length) {
-    for (const t of THEMES) {
+    for (const t of list) {
+      if (!t || !t.id) continue;
       const o = document.createElement("option");
-      o.value = t.id; o.textContent = t.name;
+      o.value = t.id; o.textContent = t.name || t.id;
       sel.appendChild(o);
     }
   }
   const grid = document.getElementById("themeGrid");
   if (grid) {
     grid.replaceChildren();
-    for (const t of THEMES) {
+    for (const t of list) {
+      if (!t || !t.id) continue;
       const div = document.createElement("div");
       div.className = "theme-opt";
       div.dataset.id = t.id;
       const sw = document.createElement("div"); sw.className = "swatch";
       const nm = document.createElement("div"); nm.className = "name";
-      nm.textContent = t.name + (t.id === DEFAULT_THEME_ID ? "（默认）" : "");
+      nm.textContent = (t.name || t.id) + (t.id === def ? "（默认）" : "");
       const ds = document.createElement("div"); ds.className = "desc";
-      ds.textContent = t.desc;
+      ds.textContent = t.desc || "";
       div.appendChild(sw); div.appendChild(nm); div.appendChild(ds);
       div.addEventListener("click", () => setTheme(t.id));
       grid.appendChild(div);
@@ -6174,8 +6202,10 @@ function renderThemeUI() {
       if (m) saved = decodeURIComponent(m[1]);
     } catch {}
   }
-  if (!saved) saved = document.documentElement.getAttribute("data-theme") || DEFAULT_THEME_ID;
-  setTheme(saved, { redraw: false });
+  if (!saved) {
+    try { saved = document.documentElement.getAttribute("data-theme"); } catch {}
+  }
+  setTheme(saved || def, { redraw: false, skipSave: true });
 }
 
 // ─── 设置 ───
