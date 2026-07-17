@@ -202,5 +202,23 @@ textarea:focus{border-color:var(--accent)}
 .tpl-active-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
 .tpl-active-row select{flex:0 0 auto}
 .row-check{width:18px;height:18px;cursor:pointer;accent-color:var(--accent)}
+.machine-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-top:4px}
+.machine-cards.is-hidden{display:none}
+#listTableWrap.is-hidden{display:none}
+.m-card{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 12px 10px;display:flex;flex-direction:column;gap:8px;box-shadow:0 0 16px var(--glow)}
+.m-card.active{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 0 16px var(--glow)}
+.m-card-head{display:flex;align-items:center;gap:8px}
+.m-card-head .mid{font-weight:700;font-size:14px;color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.m-card-meta{font-size:12px;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px 10px}
+.m-card-stats{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.m-card-stats .st{background:var(--panel);border:1px solid var(--line2);border-radius:8px;padding:6px 8px}
+.m-card-stats .st .k{font-size:11px;color:var(--muted)}
+.m-card-stats .st .v{font-size:13px;font-weight:600;margin-top:2px;color:var(--text)}
+.m-card-stats .st .v.rx{color:var(--rx)}
+.m-card-stats .st .v.tx{color:var(--tx)}
+.m-card-ops{display:flex;flex-wrap:wrap;gap:6px}
+.m-card-ops button{flex:1;min-width:72px}
+.group-tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:999px;background:var(--badge-bg);color:var(--badge-fg);border:1px solid var(--border);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.group-tag.empty{opacity:.55}
 .clock{font-variant-numeric:tabular-nums;font-size:12px;color:var(--label);padding:6px 10px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--panel2);white-space:nowrap;user-select:none}
 .clock b{color:var(--text);font-weight:600;margin-left:4px}

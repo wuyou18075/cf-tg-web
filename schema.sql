@@ -6,7 +6,8 @@ CREATE TABLE IF NOT EXISTS machines (
   callback_url TEXT,
   online_sec INTEGER DEFAULT 0,
   in_tg_report INTEGER DEFAULT 1,
-  offline_notified INTEGER DEFAULT 0
+  offline_notified INTEGER DEFAULT 0,
+  group_name TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS snapshots (
   id INTEGER PRIMARY KEY AUTOINCREMENT, machine_id TEXT NOT NULL,

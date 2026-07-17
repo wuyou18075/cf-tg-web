@@ -332,6 +332,9 @@ async function ensureSchema(env) {
   try {
     await env.DB.prepare(`ALTER TABLE machines ADD COLUMN offline_notified INTEGER DEFAULT 0`).run();
   } catch {}
+  try {
+    await env.DB.prepare(`ALTER TABLE machines ADD COLUMN group_name TEXT DEFAULT ''`).run();
+  } catch {}
 }
 
 /** 上报间隔 ≤ 此秒数视为连续在线，计入累积在线时长（与看板「在线」2h 一致） */
@@ -449,8 +452,56 @@ async function listMachines(env) {
       offline_notified: !!r.offline_notified,
       online_sec: base,
       online_sec_live: base + liveExtra,
+      group_name: String(r.group_name || "").trim(),
     };
   });
+}
+
+/** 分组名列表（config.machine_groups JSON 数组） */
+async function getGroupNames(env) {
+  const raw = await getConfigValue(env, "machine_groups");
+  let arr = [];
+  if (raw) {
+    try { arr = JSON.parse(raw); } catch { arr = []; }
+  }
+  if (!Array.isArray(arr)) arr = [];
+  // 合并机器表里已有但未登记的分组
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT DISTINCT group_name FROM machines WHERE group_name IS NOT NULL AND TRIM(group_name) != ''`
+    ).all();
+    for (const r of results || []) {
+      const g = String(r.group_name || "").trim();
+      if (g && !arr.includes(g)) arr.push(g);
+    }
+  } catch { /* ignore */ }
+  return arr.filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim());
+}
+
+async function saveGroupNames(env, names) {
+  const clean = [...new Set((names || []).map((x) => String(x || "").trim()).filter(Boolean))].slice(0, 100);
+  await setConfigValue(env, "machine_groups", JSON.stringify(clean));
+  return clean;
+}
+
+async function setMachinesGroup(env, mids, groupName) {
+  if (!env.DB) throw new Error(missingDbError(env));
+  const g = String(groupName || "").trim().slice(0, 40);
+  const ids = (mids || []).map((x) => String(x || "").trim()).filter(isValidMachineId);
+  if (!ids.length) return { ok: false, error: "未选择机器" };
+  // 新分组名自动登记
+  if (g) {
+    const names = await getGroupNames(env);
+    if (!names.includes(g)) {
+      names.push(g);
+      await saveGroupNames(env, names);
+    }
+  }
+  const stmts = ids.map((mid) =>
+    env.DB.prepare(`UPDATE machines SET group_name = ? WHERE machine_id = ?`).bind(g, mid)
+  );
+  await env.DB.batch(stmts);
+  return { ok: true, updated: ids.length, group_name: g };
 }
 
 async function getHistory(env, mid, hours) {
@@ -2194,6 +2245,24 @@ textarea:focus{border-color:var(--accent)}
 .tpl-active-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
 .tpl-active-row select{flex:0 0 auto}
 .row-check{width:18px;height:18px;cursor:pointer;accent-color:var(--accent)}
+.machine-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-top:4px}
+.machine-cards.is-hidden{display:none}
+#listTableWrap.is-hidden{display:none}
+.m-card{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 12px 10px;display:flex;flex-direction:column;gap:8px;box-shadow:0 0 16px var(--glow)}
+.m-card.active{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 0 16px var(--glow)}
+.m-card-head{display:flex;align-items:center;gap:8px}
+.m-card-head .mid{font-weight:700;font-size:14px;color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.m-card-meta{font-size:12px;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px 10px}
+.m-card-stats{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.m-card-stats .st{background:var(--panel);border:1px solid var(--line2);border-radius:8px;padding:6px 8px}
+.m-card-stats .st .k{font-size:11px;color:var(--muted)}
+.m-card-stats .st .v{font-size:13px;font-weight:600;margin-top:2px;color:var(--text)}
+.m-card-stats .st .v.rx{color:var(--rx)}
+.m-card-stats .st .v.tx{color:var(--tx)}
+.m-card-ops{display:flex;flex-wrap:wrap;gap:6px}
+.m-card-ops button{flex:1;min-width:72px}
+.group-tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:999px;background:var(--badge-bg);color:var(--badge-fg);border:1px solid var(--border);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.group-tag.empty{opacity:.55}
 .clock{font-variant-numeric:tabular-nums;font-size:12px;color:var(--label);padding:6px 10px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--panel2);white-space:nowrap;user-select:none}
 .clock b{color:var(--text);font-weight:600;margin-left:4px}
 
@@ -3105,7 +3174,14 @@ textarea:focus{border-color:var(--accent)}
       <button class="primary" onclick="openAddVps()">＋ 添加 VPS</button>
       <button onclick="refresh()">刷新</button>
       <button class="green" onclick="forceFetchAll()" id="btnForceFetch" title="签名推送到各 VPS 回调口立即上报（需公网；无 poll）">获取流量</button>
+      <label class="chk" title="勾选后在主页显示总流量统计图；关闭可省空间且不请求统计接口">
+        <input type="checkbox" id="chkShowChart" checked onchange="setChartPanelVisible(this.checked)"> 总流量统计
+      </label>
       <label class="chk"><input type="checkbox" id="filterOnline" onchange="onFilterSortChange()"> 只看在线</label>
+      <select id="filterGroup" onchange="onFilterSortChange()" title="按分组筛选" style="width:auto;min-width:110px">
+        <option value="">全部分组</option>
+        <option value="__none__">未分组</option>
+      </select>
       <select id="sortBy" onchange="onFilterSortChange()" title="排序（会记住选择）">
         <option value="last">默认（最后上报）</option>
         <option value="today_desc">今日流量 ↓</option>
@@ -3113,6 +3189,11 @@ textarea:focus{border-color:var(--accent)}
         <option value="month_desc">本月流量 ↓</option>
         <option value="uptime_desc">累积在线 ↓</option>
       </select>
+      <div class="seg" id="viewModeSeg" title="列表/卡片切换">
+        <button type="button" class="active" data-view="table" onclick="setListViewMode('table')">列表</button>
+        <button type="button" data-view="card" onclick="setListViewMode('card')">卡片</button>
+      </div>
+      <button type="button" onclick="createGroupPrompt()">新建分组</button>
       <span id="tgStatus" class="tg-pill s-not_configured" title="点击重新检测" onclick="loadTgStatus(true)">
         <span class="dot"></span><span id="tgStatusText">TG: 检测中</span>
       </span>
@@ -3122,9 +3203,6 @@ textarea:focus{border-color:var(--accent)}
     <div class="panel" id="chartPanel">
       <div class="chart-title-row">
         <h2 id="chartPanelTitle">总流量统计</h2>
-        <label class="chk" title="关闭后隐藏图表区域，节省空间，且不再请求统计接口">
-          <input type="checkbox" id="chkShowChart" checked onchange="setChartPanelVisible(this.checked)"> 显示图表
-        </label>
       </div>
       <div id="chartPanelBody">
         <div class="chart-toolbar">
@@ -3147,20 +3225,22 @@ textarea:focus{border-color:var(--accent)}
         <span>已选 <b id="batchCount">0</b> 台</span>
         <button class="warn" onclick="batchAction('include_tg')">加入 TG 汇报</button>
         <button onclick="batchAction('exclude_tg')">移出 TG 汇报</button>
+        <button onclick="batchSetGroup()">移入分组</button>
         <button class="danger" onclick="batchAction('delete')">批量删除</button>
         <span style="flex:1"></span>
         <button onclick="clearSelection()">取消选择</button>
       </div>
-      <div style="overflow:auto">
+      <div id="listTableWrap" style="overflow:auto">
         <table>
           <thead><tr>
             <th style="width:36px"><input type="checkbox" id="checkAll" class="row-check" onchange="toggleAll(this.checked)"></th>
-            <th>机器</th><th>主机</th><th>网卡</th>
+            <th>机器</th><th>分组</th><th>主机</th><th>网卡</th>
             <th>今日入/出</th><th>本月入/出</th><th>累积在线</th><th>最后上报</th><th>状态</th><th>操作</th>
           </tr></thead>
-          <tbody id="tbody"><tr><td colspan="10">加载中…</td></tr></tbody>
+          <tbody id="tbody"><tr><td colspan="11">加载中…</td></tr></tbody>
         </table>
       </div>
+      <div id="listCardWrap" class="machine-cards is-hidden"></div>
     </div>
   </div>
 
@@ -3480,9 +3560,12 @@ const esc = (s) => String(s ?? "")
   .replace(/&/g, "&amp;").replace(/</g, "&lt;")
   .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 let machines = [];
+let groupNames = [];       // 分组名列表
 let selected = null;
 let chart;
 const selectedMids = new Set();
+let listViewMode = "table"; // table | card
+let filterGroup = "";       // ""=全部, __none__=未分组, 其它=组名
 let histChart;
 let chartMode = "week";      // hour | week | month | year  （总览）
 let histMode = "week";       // hour | week | month | year  （单机弹窗）
@@ -3654,10 +3737,15 @@ function onFilterSortChange() {
   try {
     const fo = document.getElementById("filterOnline");
     const sel = document.getElementById("sortBy");
+    const fg = document.getElementById("filterGroup");
     if (fo) localStorage.setItem("dash_filter_online", fo.checked ? "1" : "0");
     if (sel && sel.value) localStorage.setItem("dash_sort_by", sel.value);
+    if (fg) {
+      filterGroup = fg.value || "";
+      localStorage.setItem("dash_filter_group", filterGroup);
+    }
   } catch { /* ignore */ }
-  renderTable();
+  renderMachineList();
 }
 function restoreFilterSortPrefs() {
   try {
@@ -3669,12 +3757,20 @@ function restoreFilterSortPrefs() {
       const ok = [...sel.options].some(o => o.value === v);
       sel.value = ok ? v : "last";
     }
+    filterGroup = localStorage.getItem("dash_filter_group") || "";
+    listViewMode = localStorage.getItem("dash_list_view") === "card" ? "card" : "table";
   } catch { /* ignore */ }
+  applyListViewMode();
+  fillGroupFilterOptions();
 }
 function machineView() {
   let arr = machines.slice();
   const fo = document.getElementById("filterOnline");
   if (fo && fo.checked) arr = arr.filter(m => online(m.ts));
+  const fg = document.getElementById("filterGroup");
+  const g = fg ? (fg.value || filterGroup || "") : (filterGroup || "");
+  if (g === "__none__") arr = arr.filter(m => !String(m.group_name || "").trim());
+  else if (g) arr = arr.filter(m => String(m.group_name || "").trim() === g);
   const sel = document.getElementById("sortBy");
   const by = sel ? sel.value : "last";
   const tot = (m) => ((m.today?.rx || 0) + (m.today?.tx || 0));
@@ -3688,21 +3784,96 @@ function machineView() {
   return arr;
 }
 
+function fillGroupFilterOptions() {
+  const fg = document.getElementById("filterGroup");
+  if (!fg) return;
+  const cur = filterGroup || fg.value || "";
+  fg.replaceChildren();
+  const opts = [["", "全部分组"], ["__none__", "未分组"], ...groupNames.map((g) => [g, g])];
+  for (const [v, t] of opts) {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = t;
+    fg.appendChild(o);
+  }
+  if (opts.some((x) => x[0] === cur)) fg.value = cur;
+  else { fg.value = ""; filterGroup = ""; }
+}
+
+function setListViewMode(mode) {
+  listViewMode = mode === "card" ? "card" : "table";
+  try { localStorage.setItem("dash_list_view", listViewMode); } catch {}
+  applyListViewMode();
+  renderMachineList();
+}
+function applyListViewMode() {
+  const tw = document.getElementById("listTableWrap");
+  const cw = document.getElementById("listCardWrap");
+  if (tw) tw.classList.toggle("is-hidden", listViewMode === "card");
+  if (cw) cw.classList.toggle("is-hidden", listViewMode !== "card");
+  document.querySelectorAll("#viewModeSeg button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.view === listViewMode);
+  });
+}
+function renderMachineList() {
+  if (listViewMode === "card") renderCardList();
+  else renderTable();
+}
+
+function makeStatusPill(m) {
+  const badge = document.createElement("span");
+  const isOn = online(m.ts);
+  badge.className = "status-pill " + (isOn ? "on" : "off");
+  const dot = document.createElement("span");
+  dot.className = "dot";
+  const lab = document.createElement("span");
+  lab.textContent = isOn ? "在线" : "离线";
+  badge.appendChild(dot);
+  badge.appendChild(lab);
+  if (m.ts) {
+    const ago = Math.max(0, Math.floor(Date.now()/1000 - Number(m.ts)));
+    const agoTxt = ago < 60 ? (ago + " 秒前")
+      : ago < 3600 ? (Math.floor(ago/60) + " 分钟前")
+      : ago < 86400 ? (Math.floor(ago/3600) + " 小时前")
+      : (Math.floor(ago/86400) + " 天前");
+    badge.title = (isOn ? "在线" : "离线") + " · 最后上报 " + agoTxt + "（阈值 2 小时内算在线）";
+  } else {
+    badge.title = "尚无上报记录";
+  }
+  return badge;
+}
+
+function makeOpsButtons(m) {
+  const wrap = document.createElement("div");
+  const mk = (text, cls, fn) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = cls;
+    b.textContent = text;
+    b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
+    return b;
+  };
+  wrap.appendChild(mk("流量统计", "sm green", () => openHistModal(m.machine_id)));
+  wrap.appendChild(mk("更新注册", "sm primary", () => openUpdateVps(m.machine_id)));
+  wrap.appendChild(mk("分组", "sm", () => setOneMachineGroup(m.machine_id)));
+  wrap.appendChild(mk("删除", "sm danger", () => deleteMachineRow(m.machine_id)));
+  return wrap;
+}
+
 function renderTable() {
   const tb = document.getElementById("tbody");
+  if (!tb) return;
   const view = machineView();
   if (!view.length) {
     tb.replaceChildren();
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 10;
+    td.colSpan = 11;
     td.textContent = machines.length ? "当前筛选下无数据" : "暂无数据";
     tr.appendChild(td);
     tb.appendChild(tr);
     updateBatchBar();
     return;
   }
-  // 用 DocumentFragment 一次挂载，减少多次回流
   const frag = document.createDocumentFragment();
   for (const m of view) {
     const tr = document.createElement("tr");
@@ -3722,11 +3893,11 @@ function renderTable() {
     tdCheck.appendChild(cb);
     tr.appendChild(tdCheck);
 
-    const uptime = (m.online_sec_live != null)
-      ? m.online_sec_live
-      : (Number(m.online_sec) || 0);
+    const uptime = (m.online_sec_live != null) ? m.online_sec_live : (Number(m.online_sec) || 0);
+    const gname = String(m.group_name || "").trim();
     const texts = [
       m.machine_id || "",
+      gname || "未分组",
       m.hostname || "",
       m.interface || "",
       gb(m.today && m.today.rx) + " / " + gb(m.today && m.today.tx),
@@ -3734,72 +3905,34 @@ function renderTable() {
       fmtDuration(uptime),
       fmtTime(m.ts),
     ];
-    for (const text of texts) {
+    for (let ti = 0; ti < texts.length; ti++) {
       const td = document.createElement("td");
-      td.textContent = text;
-      td.title = text;
+      if (ti === 1) {
+        const tag = document.createElement("span");
+        tag.className = "group-tag" + (gname ? "" : " empty");
+        tag.textContent = texts[ti];
+        tag.title = texts[ti];
+        td.appendChild(tag);
+      } else {
+        td.textContent = texts[ti];
+        td.title = texts[ti];
+      }
       tr.appendChild(td);
     }
 
     const tdSt = document.createElement("td");
     tdSt.className = "status-cell";
-    const badge = document.createElement("span");
-    const isOn = online(m.ts);
-    badge.className = "status-pill " + (isOn ? "on" : "off");
-    const dot = document.createElement("span");
-    dot.className = "dot";
-    const lab = document.createElement("span");
-    lab.textContent = isOn ? "在线" : "离线";
-    badge.appendChild(dot);
-    badge.appendChild(lab);
-    // 悬停显示距上次上报多久，避免只看“在线/离线”含糊
-    if (m.ts) {
-      const ago = Math.max(0, Math.floor(Date.now()/1000 - Number(m.ts)));
-      const agoTxt = ago < 60 ? (ago + " 秒前")
-        : ago < 3600 ? (Math.floor(ago/60) + " 分钟前")
-        : ago < 86400 ? (Math.floor(ago/3600) + " 小时前")
-        : (Math.floor(ago/86400) + " 天前");
-      badge.title = (isOn ? "在线" : "离线") + " · 最后上报 " + agoTxt + "（阈值 2 小时内算在线）";
-    } else {
-      badge.title = "尚无上报记录";
-    }
-    tdSt.appendChild(badge);
+    tdSt.appendChild(makeStatusPill(m));
     tr.appendChild(tdSt);
 
     const tdOps = document.createElement("td");
     tdOps.className = "ops";
-    const btnHist = document.createElement("button");
-    btnHist.type = "button";
-    btnHist.className = "sm green";
-    btnHist.textContent = "流量统计";
-    btnHist.addEventListener("click", (e) => {
-      e.stopPropagation();
-      openHistModal(m.machine_id);
-    });
-    const btnUp = document.createElement("button");
-    btnUp.type = "button";
-    btnUp.className = "sm primary";
-    btnUp.textContent = "更新注册";
-    btnUp.addEventListener("click", (e) => {
-      e.stopPropagation();
-      openUpdateVps(m.machine_id);
-    });
-    const btnDel = document.createElement("button");
-    btnDel.type = "button";
-    btnDel.className = "sm danger";
-    btnDel.textContent = "删除";
-    btnDel.addEventListener("click", (e) => {
-      e.stopPropagation();
-      deleteMachineRow(m.machine_id);
-    });
-    tdOps.appendChild(btnHist);
-    tdOps.appendChild(btnUp);
-    tdOps.appendChild(btnDel);
+    const ops = makeOpsButtons(m);
+    while (ops.firstChild) tdOps.appendChild(ops.firstChild);
     tr.appendChild(tdOps);
 
     tr.addEventListener("click", (e) => {
       if (e.target.closest("button") || e.target.closest("input")) return;
-      // 仅切换高亮，避免整表重绘造成「刷新感」
       const prev = tb.querySelector("tr.active");
       if (prev) prev.classList.remove("active");
       selected = m.machine_id;
@@ -3811,6 +3944,157 @@ function renderTable() {
   updateBatchBar();
 }
 
+function renderCardList() {
+  const wrap = document.getElementById("listCardWrap");
+  if (!wrap) return;
+  const view = machineView();
+  wrap.replaceChildren();
+  if (!view.length) {
+    const empty = document.createElement("div");
+    empty.className = "muted";
+    empty.style.padding = "12px";
+    empty.textContent = machines.length ? "当前筛选下无数据" : "暂无数据";
+    wrap.appendChild(empty);
+    updateBatchBar();
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const m of view) {
+    const card = document.createElement("div");
+    card.className = "m-card" + (m.machine_id === selected ? " active" : "");
+    card.dataset.mid = m.machine_id || "";
+
+    const head = document.createElement("div");
+    head.className = "m-card-head";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "row-check";
+    cb.checked = selectedMids.has(m.machine_id);
+    cb.addEventListener("change", (e) => {
+      e.stopPropagation();
+      toggleSelect(m.machine_id, cb.checked);
+    });
+    const mid = document.createElement("div");
+    mid.className = "mid";
+    mid.textContent = m.machine_id || "";
+    mid.title = m.machine_id || "";
+    head.appendChild(cb);
+    head.appendChild(mid);
+    head.appendChild(makeStatusPill(m));
+    card.appendChild(head);
+
+    const meta = document.createElement("div");
+    meta.className = "m-card-meta";
+    const gname = String(m.group_name || "").trim();
+    const tag = document.createElement("span");
+    tag.className = "group-tag" + (gname ? "" : " empty");
+    tag.textContent = gname || "未分组";
+    meta.appendChild(tag);
+    const host = document.createElement("span");
+    host.textContent = (m.hostname || "-") + " · " + (m.interface || "-");
+    meta.appendChild(host);
+    card.appendChild(meta);
+
+    const uptime = (m.online_sec_live != null) ? m.online_sec_live : (Number(m.online_sec) || 0);
+    const stats = document.createElement("div");
+    stats.className = "m-card-stats";
+    const cells = [
+      ["今日入站", gb(m.today && m.today.rx), "rx"],
+      ["今日出站", gb(m.today && m.today.tx), "tx"],
+      ["本月入站", gb(m.month && m.month.rx), "rx"],
+      ["本月出站", gb(m.month && m.month.tx), "tx"],
+    ];
+    for (const [k, v, cls] of cells) {
+      const st = document.createElement("div");
+      st.className = "st";
+      const kk = document.createElement("div"); kk.className = "k"; kk.textContent = k;
+      const vv = document.createElement("div"); vv.className = "v " + cls; vv.textContent = v;
+      st.appendChild(kk); st.appendChild(vv);
+      stats.appendChild(st);
+    }
+    card.appendChild(stats);
+
+    const foot = document.createElement("div");
+    foot.className = "m-card-meta";
+    foot.textContent = "在线 " + fmtDuration(uptime) + " · " + fmtTime(m.ts);
+    card.appendChild(foot);
+
+    const ops = makeOpsButtons(m);
+    ops.className = "m-card-ops";
+    card.appendChild(ops);
+
+    card.addEventListener("click", (e) => {
+      if (e.target.closest("button") || e.target.closest("input")) return;
+      selected = m.machine_id;
+      wrap.querySelectorAll(".m-card.active").forEach((el) => el.classList.remove("active"));
+      card.classList.add("active");
+    });
+    frag.appendChild(card);
+  }
+  wrap.appendChild(frag);
+  updateBatchBar();
+}
+
+async function createGroupPrompt() {
+  const name = prompt("新建分组名称（1-40 字）：", "");
+  if (name == null) return;
+  const g = String(name).trim().slice(0, 40);
+  if (!g) { toast("分组名不能为空"); return; }
+  try {
+    const data = await api("/api/groups", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: g }),
+    });
+    if (!data || !data.ok) { toast((data && data.error) || "创建失败"); return; }
+    groupNames = data.groups || groupNames;
+    fillGroupFilterOptions();
+    toast("已创建分组：" + g);
+  } catch (e) {
+    toast("创建失败：" + (e && e.message ? e.message : e));
+  }
+}
+
+async function setOneMachineGroup(mid) {
+  const cur = (machines.find((m) => m.machine_id === mid) || {}).group_name || "";
+  const hint = groupNames.length ? ("可选：" + groupNames.join(" / ")) : "输入新分组名，留空=移出分组";
+  const name = prompt("设置分组（" + hint + "）", cur);
+  if (name == null) return;
+  await applyGroupToMachines([mid], String(name).trim());
+}
+
+async function batchSetGroup() {
+  const ids = [...selectedMids];
+  if (!ids.length) { toast("未选择机器"); return; }
+  const hint = groupNames.length ? ("可选：" + groupNames.join(" / ")) : "输入分组名，留空=移出分组";
+  const name = prompt("将 " + ids.length + " 台移入分组（" + hint + "）", "");
+  if (name == null) return;
+  await applyGroupToMachines(ids, String(name).trim());
+}
+
+async function applyGroupToMachines(ids, groupName) {
+  try {
+    const data = await api("/api/machines/set-group", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ machine_ids: ids, group_name: groupName }),
+    });
+    if (!data || !data.ok) { toast((data && data.error) || "设置分组失败"); return; }
+    for (const m of machines) {
+      if (ids.includes(m.machine_id)) m.group_name = groupName;
+    }
+    if (groupName && !groupNames.includes(groupName)) groupNames.push(groupName);
+    fillGroupFilterOptions();
+    toast(groupName
+      ? ("已移入分组「" + groupName + "」×" + (data.updated || ids.length))
+      : ("已移出分组 ×" + (data.updated || ids.length)));
+    clearSelection();
+    renderMachineList();
+  } catch (e) {
+    toast("设置分组失败：" + (e && e.message ? e.message : e));
+  }
+}
+
 function toggleSelect(mid, checked) {
   if (checked) selectedMids.add(mid); else selectedMids.delete(mid);
   updateBatchBar();
@@ -3818,16 +4102,20 @@ function toggleSelect(mid, checked) {
 function toggleAll(checked) {
   selectedMids.clear();
   if (checked) for (const m of machineView()) selectedMids.add(m.machine_id);
-  document.querySelectorAll("#tbody .row-check").forEach(cb => {
-    cb.checked = selectedMids.has(cb.dataset.mid);
+  document.querySelectorAll("#tbody .row-check, #listCardWrap .row-check").forEach(cb => {
+    const mid = cb.dataset.mid || (cb.closest("[data-mid]") && cb.closest("[data-mid]").dataset.mid) || "";
+    // table checkboxes have dataset.mid; card ones may not — re-render safer
+    cb.checked = checked;
   });
+  // card checkboxes lack dataset.mid; re-render list to sync
+  renderMachineList();
   updateBatchBar();
 }
 function clearSelection() {
   selectedMids.clear();
-  document.querySelectorAll("#tbody .row-check").forEach(cb => cb.checked = false);
   const ca = document.getElementById("checkAll");
   if (ca) ca.checked = false;
+  renderMachineList();
   updateBatchBar();
 }
 function updateBatchBar() {
@@ -4351,7 +4639,11 @@ function setChartPanelVisible(show, opts) {
   const panel = document.getElementById("chartPanel");
   const chk = document.getElementById("chkShowChart");
   if (body) body.classList.toggle("is-hidden", !on);
-  if (panel) panel.classList.toggle("collapsed", !on);
+  // 关闭时整块面板隐藏，不占主页空间
+  if (panel) {
+    panel.classList.toggle("collapsed", !on);
+    panel.style.display = on ? "" : "none";
+  }
   if (chk) chk.checked = on;
   if (!on) {
     try { if (chart) { chart.destroy(); chart = null; } } catch {}
@@ -4370,7 +4662,10 @@ function restoreChartPanelVisible() {
   const panel = document.getElementById("chartPanel");
   const chk = document.getElementById("chkShowChart");
   if (body) body.classList.toggle("is-hidden", !on);
-  if (panel) panel.classList.toggle("collapsed", !on);
+  if (panel) {
+    panel.classList.toggle("collapsed", !on);
+    panel.style.display = on ? "" : "none";
+  }
   if (chk) chk.checked = on;
 }
 
@@ -4502,9 +4797,11 @@ async function refresh(opts = {}) {
       const [machData, histData] = await Promise.all(tasks);
 
       machines = (machData && machData.machines) || [];
+      if (Array.isArray(machData && machData.groups)) groupNames = machData.groups;
+      fillGroupFilterOptions();
       if (selected && !machines.find(m => m.machine_id === selected)) selected = null;
       renderSummary();
-      renderTable();
+      renderMachineList();
 
       if (wantHistory && histData) {
         mainPoints = asChartData(histData);
@@ -5709,8 +6006,48 @@ export default {
 
     // GET /api/machines
     if (req.method === "GET" && url.pathname === "/api/machines") {
-      if (!env.DB) return json({ ok: true, machines: [] });
-      return json({ ok: true, machines: await listMachines(env) });
+      if (!env.DB) return json({ ok: true, machines: [], groups: [] });
+      const machines = await listMachines(env);
+      const groups = await getGroupNames(env);
+      return json({ ok: true, machines, groups });
+    }
+
+    // GET /api/groups — 分组名列表
+    if (req.method === "GET" && url.pathname === "/api/groups") {
+      if (!env.DB) return json({ ok: true, groups: [] });
+      return json({ ok: true, groups: await getGroupNames(env) });
+    }
+
+    // POST /api/groups — 新建/覆盖分组名列表 { name } 或 { groups:[] }
+    if (req.method === "POST" && url.pathname === "/api/groups") {
+      if (!env.DB) return json({ ok: false, error: missingDbError(env) }, 500);
+      let body = {};
+      try { body = await req.json(); } catch { body = {}; }
+      if (Array.isArray(body.groups)) {
+        const groups = await saveGroupNames(env, body.groups);
+        return json({ ok: true, groups });
+      }
+      const name = String(body.name || body.group || "").trim().slice(0, 40);
+      if (!name) return json({ ok: false, error: "分组名不能为空" }, 400);
+      const names = await getGroupNames(env);
+      if (!names.includes(name)) names.push(name);
+      const groups = await saveGroupNames(env, names);
+      return json({ ok: true, groups, created: name });
+    }
+
+    // POST /api/machines/set-group — { machine_ids:[], group_name }
+    if (req.method === "POST" && url.pathname === "/api/machines/set-group") {
+      if (!env.DB) return json({ ok: false, error: missingDbError(env) }, 500);
+      let body = {};
+      try { body = await req.json(); } catch { body = {}; }
+      const mids = body.machine_ids || body.ids || [];
+      const g = body.group_name != null ? body.group_name : body.group;
+      try {
+        const r = await setMachinesGroup(env, mids, g);
+        return json(r, r.ok ? 200 : 400);
+      } catch (e) {
+        return json({ ok: false, error: String(e && e.message ? e.message : e) }, 500);
+      }
     }
 
     // GET /api/history — mode=hour|day|month, span=小时/天数/月数, mid 可选（空=全部合计）
