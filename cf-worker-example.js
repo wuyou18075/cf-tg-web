@@ -286,8 +286,11 @@ function passwordEqual(a, b) {
 
 // ─── D1 自动初始化 ───
 
+// 同一 Worker isolate 内只跑一次，避免每个请求都 CREATE/ALTER
+let _schemaReady = false;
 async function ensureSchema(env) {
   if (!env.DB) return;
+  if (_schemaReady) return;
   await env.DB.batch([
     env.DB.prepare(
       `CREATE TABLE IF NOT EXISTS machines (
@@ -335,6 +338,7 @@ async function ensureSchema(env) {
   try {
     await env.DB.prepare(`ALTER TABLE machines ADD COLUMN group_name TEXT DEFAULT ''`).run();
   } catch {}
+  _schemaReady = true;
 }
 
 /** 上报间隔 ≤ 此秒数视为连续在线，计入累积在线时长（与看板「在线」2h 一致） */
@@ -4455,6 +4459,7 @@ async function saveUiPrefsToServer(opts) {
       if (!silent) toast((data && data.error) || "偏好保存失败");
       return false;
     }
+    try { sessionStorage.setItem("dash_cloud_prefs_loaded", "1"); } catch {}
     if (!silent) toast("偏好已记录到服务器 · 其他浏览器登录可同步");
     return true;
   } catch (e) {
@@ -5964,8 +5969,9 @@ async function refresh(opts = {}) {
     _refreshQueued = opts;
     return _refreshInFlight;
   }
-  const wantHistory = opts.history !== false && isChartPanelVisible();
-  const wantTg = opts.tg !== false;
+  // history：图表面板开启时才拉；tg：仅显式 opts.tg===true 才拉（省请求）
+  const wantHistory = isChartPanelVisible() && opts.history !== false;
+  const wantTg = opts.tg === true;
   _refreshInFlight = (async () => {
     try {
       const p = chartPreset(chartMode);
@@ -6765,11 +6771,11 @@ function startForcePoll() {
   if (!needWait) return;
 
   let n = 0;
-  const max = 15; // 最长约 30s，成功则提前结束
+  const max = 6; // 最多约 18s，且只刷列表（不打 history/tg）
   const tick = async () => {
     n++;
     try {
-      await refresh();
+      await refresh({ history: false, tg: false });
       if (!forceTrack) {
         forcePollTimer = null;
         return;
@@ -6806,12 +6812,12 @@ function startForcePoll() {
     } catch (e) { /* ignore poll errors */ }
     // 仅在仍有待上报时继续
     if (forceTrack && forceTrack.rows.some((r) => r.state === "pushed" && !r.reported && !r.abandoned)) {
-      forcePollTimer = setTimeout(tick, 2000);
+      forcePollTimer = setTimeout(tick, 3000);
     } else {
       forcePollTimer = null;
     }
   };
-  forcePollTimer = setTimeout(tick, 1500);
+  forcePollTimer = setTimeout(tick, 2000);
 }
 
 async function forceFetchAll() {
@@ -6841,8 +6847,8 @@ async function forceFetchAll() {
       const push = data.pushed != null ? data.pushed : 0;
       st.textContent = "✓ 推送 " + acc + "/" + push + "（失败 " + (data.failed || 0) + "，跳过 " + (data.skipped || 0) + "）";
       openForceResult(data);
-      // 立即刷一次列表
-      await refresh();
+      // 立即刷一次列表（不拉 history/tg，省请求）
+      await refresh({ history: false, tg: false });
     }
   } catch (e) {
     st.textContent = "✗ " + e.message;
@@ -7063,8 +7069,24 @@ restoreAllUiPrefs();
 tickDashClock();
 setInterval(tickDashClock, 1000);
 (async function bootUi() {
-  try { await loadUiPrefsFromServer(); } catch (e) { console.log("bootUi prefs", e); }
-  try { await refresh(); } catch (e) { console.log("bootUi refresh", e); }
+  // 每浏览器会话最多拉一次云端偏好，避免每次刷新都打 /api/ui-prefs
+  try {
+    let needCloud = true;
+    try { needCloud = sessionStorage.getItem("dash_cloud_prefs_loaded") !== "1"; } catch {}
+    if (needCloud) {
+      const ok = await loadUiPrefsFromServer();
+      if (ok) {
+        try { sessionStorage.setItem("dash_cloud_prefs_loaded", "1"); } catch {}
+      }
+    }
+  } catch (e) { console.log("bootUi prefs", e); }
+  // 首屏：列表必须；关图表不拉 history；TG 状态不主动拉
+  try {
+    await refresh({
+      history: isChartPanelVisible(),
+      tg: false,
+    });
+  } catch (e) { console.log("bootUi refresh", e); }
 })();
 </script>`;
 }
@@ -7075,11 +7097,25 @@ export default {
   async fetch(req, env) {
     const url = new URL(req.url);
 
-    // 自动初始化（失败时带上原因，避免生成命令时无表）
+    // 无 DB 的静态路径：不跑 ensureSchema
+    if (req.method === "GET" && (url.pathname === "/favicon.ico" || url.pathname === "/favicon.png")) {
+      const b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5W5a0AAAAASUVORK5CYII=";
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new Response(bytes, {
+        headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=86400" },
+      });
+    }
+
+    // 自动初始化（isolate 内缓存；失败时允许下次重试）
     let schemaErr = "";
     if (env.DB) {
       try { await ensureSchema(env); }
-      catch (e) { schemaErr = e && e.message ? e.message : String(e); }
+      catch (e) {
+        schemaErr = e && e.message ? e.message : String(e);
+        _schemaReady = false;
+      }
     }
 
     // POST /api/report — agent 上报
@@ -7459,21 +7495,9 @@ export default {
     }
 
     // GET / — 看板
-    if (req.method === "GET" && (url.pathname === "/favicon.ico" || url.pathname === "/favicon.png")) {
-      // 1x1 transparent PNG
-      const b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5W5a0AAAAASUVORK5CYII=";
-      const bin = atob(b64);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      return new Response(bytes, { headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=86400" } });
-    }
     if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
-      let bootPrefs = null;
-      try {
-        const got = await getUiPrefs(env);
-        bootPrefs = got && got.exists ? got.prefs : null;
-      } catch {}
-      return html(dashboardPage(req, bootPrefs));
+      // 打开看板不读 D1 偏好，省请求；主题用 cookie，完整偏好进页后按会话拉取
+      return html(dashboardPage(req, null));
     }
 
     return json({ ok: false, error: "not found" }, 404);
