@@ -1,0 +1,14 @@
+/* theme token: 墨夜（noir）— 哑光深灰黑 */
+html[data-theme="noir"]{
+  color-scheme:dark;
+  --bg:#050608; --bg2:#090b0f; --panel:#0c0e13; --panel2:#080a0e;
+  --line:#1a1e26; --line2:#14181f; --border:#252a34;
+  --text:#cfd5e0; --muted:#7f8796; --label:#9aa3b2;
+  --hover:#12161e; --accent:#3d8fb0; --accent2:#347a97;
+  --ok:#2aa878; --ok2:#228a68; --warn:#b8861a; --danger:#c45c5c; --danger2:#a84c4c;
+  --badge-bg:#121720; --badge-fg:#8ebfd4; --badge-off-bg:#281416; --badge-off-fg:#d09090;
+  --rx:#3d8fb0; --tx:#6b7ab8; --rx-soft:rgba(61,143,176,.85); --tx-soft:rgba(107,122,184,.82);
+  --rx-fill:rgba(61,143,176,.10); --tx-fill:rgba(107,122,184,.09);
+  --grid:#151922; --glow:transparent; --header-glow:none;
+  --body-bg:#050608;
+}

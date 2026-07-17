@@ -1,0 +1,15 @@
+/* theme token: 琉璃（glass）— 深空毛玻璃 */
+html[data-theme="glass"]{
+  color-scheme:dark;
+  --bg:#0a1024; --bg2:rgba(12,18,40,.72); --panel:rgba(255,255,255,.08); --panel2:rgba(8,12,28,.55);
+  --line:rgba(255,255,255,.14); --line2:rgba(255,255,255,.08); --border:rgba(255,255,255,.18);
+  --text:#f4f7ff; --muted:#b7c3e0; --label:#d7e0f5;
+  --hover:rgba(255,255,255,.12); --accent:#7dd3fc; --accent2:#38bdf8;
+  --ok:#34d399; --ok2:#10b981; --warn:#fbbf24; --danger:#fb7185; --danger2:#f43f5e;
+  --badge-bg:rgba(125,211,252,.18); --badge-fg:#e0f2fe; --badge-off-bg:rgba(251,113,133,.16); --badge-off-fg:#fecdd3;
+  --rx:#7dd3fc; --tx:#a5b4fc; --rx-soft:rgba(125,211,252,.9); --tx-soft:rgba(165,180,252,.88);
+  --rx-fill:rgba(125,211,252,.16); --tx-fill:rgba(165,180,252,.14);
+  --grid:rgba(255,255,255,.08); --glow:rgba(125,211,252,.18); --header-glow:linear-gradient(90deg,rgba(125,211,252,.12),rgba(165,180,252,.08));
+  --blur:16px;
+  --body-bg:radial-gradient(1200px 600px at 10% -10%, rgba(56,189,248,.28), transparent 55%), radial-gradient(900px 500px at 100% 0%, rgba(129,140,248,.26), transparent 50%), radial-gradient(800px 500px at 50% 100%, rgba(45,212,191,.12), transparent 45%), #0a1024;
+}

@@ -1,0 +1,19 @@
+/* overrides for theme: prairie */
+
+html[data-theme="paper"] button.warn,
+html[data-theme="prairie"] button.warn{color:#111}
+
+html[data-theme="paper"] .card,
+html[data-theme="prairie"] .card,
+html[data-theme="paper"] .panel,
+html[data-theme="prairie"] .panel,
+html[data-theme="paper"] .settings-card,
+html[data-theme="prairie"] .settings-card{
+  box-shadow:0 8px 28px rgba(15,23,42,.06);
+}
+
+html[data-theme="prairie"] button.primary{color:#fff}
+
+html[data-theme="prairie"] .status-pill.on{color:#2f5a3a;background:#dff0db;border-color:#a8cba1}
+
+html[data-theme="prairie"] .status-pill.off{color:#8a3a3a;background:#f0d4d4;border-color:#d9a0a0}

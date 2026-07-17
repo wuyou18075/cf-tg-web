@@ -1,0 +1,15 @@
+/* 文档用顺序；实际构建由 scripts/build-themes.mjs 拼接 */
+@import url("./base.css");
+@import url("./tokens/default.css");
+@import url("./tokens/cyber.css");
+@import url("./tokens/noir.css");
+@import url("./tokens/glass.css");
+@import url("./tokens/paper.css");
+@import url("./tokens/prairie.css");
+@import url("./tokens/crimson.css");
+@import url("./overrides/noir.css");
+@import url("./overrides/glass.css");
+@import url("./overrides/paper.css");
+@import url("./overrides/prairie.css");
+@import url("./overrides/crimson.css");
+@import url("./swatches.css");

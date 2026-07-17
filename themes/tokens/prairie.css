@@ -1,0 +1,14 @@
+/* theme token: 原谅色（prairie）— 柔雾浅绿 + 图表冷暖对比 */
+html[data-theme="prairie"]{
+  color-scheme:light;
+  --bg:#f3f7f1; --bg2:#f8fbf6; --panel:#ffffff; --panel2:#eef5ea;
+  --line:#d7e5d4; --line2:#e5efe2; --border:#c5d8c0;
+  --text:#1c2b1f; --muted:#5f7463; --label:#3f5a46;
+  --hover:#e5f0e3; --accent:#3f7d4e; --accent2:#326641;
+  --ok:#4f8f5c; --ok2:#3f7d4e; --warn:#c28b2a; --danger:#c45c5c; --danger2:#a84848;
+  --badge-bg:#dcead9; --badge-fg:#2f5a3a; --badge-off-bg:#f3d6d6; --badge-off-fg:#8a3a3a;
+  /* 入站冷色蓝、出站暖琥珀，避免两条都是绿 */
+  --rx:#2563eb; --tx:#d97706; --rx-soft:rgba(37,99,235,.88); --tx-soft:rgba(217,119,6,.88);
+  --rx-fill:rgba(37,99,235,.14); --tx-fill:rgba(217,119,6,.12);
+  --grid:#d5e3d2; --glow:rgba(63,125,78,.08); --header-glow:linear-gradient(90deg,rgba(63,125,78,.08),rgba(180,200,150,.05));
+}

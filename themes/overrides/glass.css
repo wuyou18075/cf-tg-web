@@ -1,0 +1,155 @@
+/* overrides for theme: glass */
+
+/* 玻璃主题：毛玻璃与半透明表面 */
+html[data-theme="glass"] header,
+html[data-theme="glass"] .panel,
+html[data-theme="glass"] .card,
+html[data-theme="glass"] .settings-card,
+html[data-theme="glass"] .modal,
+html[data-theme="glass"] .batch-bar,
+html[data-theme="glass"] .clock,
+html[data-theme="glass"] .toast{
+  backdrop-filter: blur(var(--blur));
+  -webkit-backdrop-filter: blur(var(--blur));
+}
+
+html[data-theme="glass"] header{background:rgba(10,16,36,.55)}
+
+/* 输入与普通按钮：半透明玻璃，但不要波及主题切换下拉 */
+html[data-theme="glass"] button:not(.primary):not(.green):not(.warn):not(.danger),
+html[data-theme="glass"] .settings-form input,
+html[data-theme="glass"] .settings-form textarea,
+html[data-theme="glass"] textarea,
+html[data-theme="glass"] .seg button,
+html[data-theme="glass"] .section-note,
+html[data-theme="glass"] .tpl-help,
+html[data-theme="glass"] .tpl-preview,
+html[data-theme="glass"] .settings-form select:not(#themeSelect),
+html[data-theme="glass"] select:not(#themeSelect){
+  background:rgba(255,255,255,.07);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-color:rgba(255,255,255,.16);
+  color:var(--text);
+}
+
+/* 琉璃按钮：半透明实色，避免渐变在毛玻璃上发脏/失真 */
+html[data-theme="glass"] button.primary,
+html[data-theme="glass"] .seg button.active{
+  background:rgba(56,189,248,.88);
+  border:1px solid rgba(125,211,252,.65);
+  color:#041018;
+  font-weight:700;
+  box-shadow:0 4px 14px rgba(56,189,248,.18);
+  backdrop-filter:none;
+  -webkit-backdrop-filter:none;
+}
+
+html[data-theme="glass"] button.primary:hover{
+  background:rgba(125,211,252,.95);
+  border-color:rgba(186,230,253,.8);
+  color:#041018;
+}
+
+html[data-theme="glass"] button.green{
+  background:rgba(52,211,153,.88);
+  border:1px solid rgba(110,231,183,.6);
+  color:#042f1a;
+  font-weight:700;
+  box-shadow:0 4px 12px rgba(52,211,153,.16);
+  backdrop-filter:none;
+  -webkit-backdrop-filter:none;
+}
+
+html[data-theme="glass"] button.green:hover{
+  background:rgba(110,231,183,.95);
+}
+
+html[data-theme="glass"] button.warn{
+  background:rgba(245,158,11,.9);
+  border:1px solid rgba(251,191,36,.65);
+  color:#1f1403;
+  font-weight:700;
+  box-shadow:0 4px 12px rgba(245,158,11,.16);
+  backdrop-filter:none;
+  -webkit-backdrop-filter:none;
+}
+
+html[data-theme="glass"] button.warn:hover{
+  background:rgba(251,191,36,.95);
+}
+
+html[data-theme="glass"] button.danger{
+  background:rgba(251,113,133,.9);
+  border:1px solid rgba(253,164,175,.6);
+  color:#3f0a14;
+  font-weight:700;
+  box-shadow:0 4px 12px rgba(251,113,133,.16);
+  backdrop-filter:none;
+  -webkit-backdrop-filter:none;
+}
+
+html[data-theme="glass"] button.danger:hover{
+  background:rgba(253,164,175,.95);
+}
+
+html[data-theme="glass"] button.sm.primary,
+html[data-theme="glass"] button.sm.green,
+html[data-theme="glass"] button.sm.danger{
+  box-shadow:none;
+}
+
+/* 普通下拉：深底浅字；选项层：浅底深字 */
+html[data-theme="glass"] select:not(#themeSelect),
+html[data-theme="glass"] .settings-form select:not(#themeSelect){
+  color:#f4f7ff;
+  background:rgba(8,14,32,.82);
+  border-color:rgba(125,211,252,.35);
+}
+
+html[data-theme="glass"] select:not(#themeSelect) option,
+html[data-theme="glass"] .settings-form select:not(#themeSelect) option{
+  color:#0b1220;
+  background:#f8fafc;
+}
+
+html[data-theme="glass"] select:not(#themeSelect) option:checked,
+html[data-theme="glass"] select:not(#themeSelect) option:hover{
+  color:#041018;
+  background:#bae6fd;
+}
+
+/* 主题切换下拉：不吃玻璃透明，固定深实心 */
+html[data-theme="glass"] #themeSelect,
+html[data-theme="glass"] .theme-switch select{
+  color:#eaf6ff !important;
+  background:#0b1428 !important;
+  border:1px solid #3b82f6 !important;
+  backdrop-filter:none !important;
+  -webkit-backdrop-filter:none !important;
+  box-shadow:none !important;
+}
+
+html[data-theme="glass"] #themeSelect option,
+html[data-theme="glass"] .theme-switch select option{
+  color:#0b1220 !important;
+  background:#f8fafc !important;
+}
+
+html[data-theme="glass"] .status-pill.on{color:#bbf7d0;background:rgba(34,197,94,.16);border-color:rgba(134,239,172,.28)}
+
+html[data-theme="glass"] .status-pill.off{color:#fecdd3;background:rgba(251,113,133,.14);border-color:rgba(251,113,133,.28)}
+
+html[data-theme="glass"] #s_t_hour,
+html[data-theme="glass"] select#s_t_hour{
+  color:#eaf6ff !important;
+  background:#0b1428 !important;
+  border:1px solid #3b82f6 !important;
+  backdrop-filter:none !important;
+  -webkit-backdrop-filter:none !important;
+}
+
+html[data-theme="glass"] #s_t_hour option{
+  color:#0b1220 !important;
+  background:#f8fafc !important;
+}

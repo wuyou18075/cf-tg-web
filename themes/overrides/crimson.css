@@ -1,0 +1,38 @@
+/* overrides for theme: crimson */
+
+html[data-theme="crimson"] button.primary,
+html[data-theme="crimson"] .seg button.active{
+  background:#c45c6a; border:1px solid #d47884; color:#1a080c; font-weight:700; box-shadow:none;
+}
+
+html[data-theme="crimson"] button.primary:hover{background:#d47884;border-color:#e8a0aa;color:#1a080c}
+
+html[data-theme="crimson"] button.green{background:#3fae7a;border-color:#5fc993;color:#041810;font-weight:700;box-shadow:none}
+
+html[data-theme="crimson"] button.warn{background:#d4a017;border-color:#e0b84a;color:#1a1203;font-weight:700;box-shadow:none}
+
+html[data-theme="crimson"] button.danger{background:#e06b6b;border-color:#f0a0a0;color:#1a0808;font-weight:700;box-shadow:none}
+
+html[data-theme="crimson"] button:not(.primary):not(.green):not(.warn):not(.danger),
+html[data-theme="crimson"] select,
+html[data-theme="crimson"] .settings-form input,
+html[data-theme="crimson"] .settings-form select,
+html[data-theme="crimson"] .settings-form textarea,
+html[data-theme="crimson"] textarea,
+html[data-theme="crimson"] .seg button{
+  background:#1c1014; border-color:#4a2c34; color:var(--text); box-shadow:none;
+}
+
+html[data-theme="crimson"] .seg button.active{background:#c45c6a;border-color:#d47884;color:#1a080c}
+
+html[data-theme="crimson"] header{background:#1a0e11;border-bottom-color:#3a2228;box-shadow:none}
+
+html[data-theme="crimson"] .card,
+html[data-theme="crimson"] .panel,
+html[data-theme="crimson"] .settings-card{
+  background:#221316; box-shadow:0 1px 0 rgba(255,255,255,.03),0 8px 22px rgba(0,0,0,.35);
+}
+
+html[data-theme="crimson"] .status-pill.on{color:#86efac;background:rgba(63,174,122,.14);border-color:rgba(63,174,122,.3)}
+
+html[data-theme="crimson"] .status-pill.off{color:#f0a8a8;background:rgba(224,107,107,.14);border-color:rgba(224,107,107,.3)}

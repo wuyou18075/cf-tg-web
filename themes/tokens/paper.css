@@ -1,0 +1,14 @@
+/* theme token: 雾蓝白（paper）— 淡蓝浅色 */
+html[data-theme="paper"]{
+  color-scheme:light;
+  --bg:#e6eef8; --bg2:#edf3fb; --panel:#f3f7fc; --panel2:#e8eef8;
+  --line:#cfdced; --line2:#dbe5f2; --border:#bfcee4;
+  --text:#1e2a3a; --muted:#5b6b80; --label:#3f5168;
+  --hover:#d9e7f7; --accent:#3b82f6; --accent2:#2563eb;
+  --ok:#059669; --ok2:#047857; --warn:#d97706; --danger:#dc2626; --danger2:#b91c1c;
+  --badge-bg:#dbeafe; --badge-fg:#1d4ed8; --badge-off-bg:#fee2e2; --badge-off-fg:#b91c1c;
+  --rx:#3b82f6; --tx:#14b8a6; --rx-soft:rgba(59,130,246,.9); --tx-soft:rgba(20,184,166,.88);
+  --rx-fill:rgba(59,130,246,.12); --tx-fill:rgba(20,184,166,.12);
+  --grid:#d3e0ef; --glow:rgba(59,111,212,.08); --header-glow:linear-gradient(90deg,rgba(59,111,212,.06),transparent);
+  --body-bg:linear-gradient(180deg,#e3ecf7 0%,#eaf1f9 50%,#e6eef8 100%);
+}

@@ -1,0 +1,14 @@
+/* theme token: 极夜蓝（default）— 深蓝控制台，兼作 :root 回退 */
+:root, html[data-theme="default"]{
+  color-scheme:dark;
+  --bg:#0b1220; --bg2:#0e1628; --panel:#121a2b; --panel2:#0b1220;
+  --line:#243049; --line2:#1e2a42; --border:#33415f;
+  --text:#e8eefc; --muted:#8aa0c6; --label:#9fb3d9;
+  --hover:#1a2740; --accent:#3b82f6; --accent2:#2563eb;
+  --ok:#16a34a; --ok2:#15803d; --warn:#d97706; --danger:#b91c1c; --danger2:#991b1b;
+  --badge-bg:#1e3a5f; --badge-fg:#93c5fd; --badge-off-bg:#3f1d1d; --badge-off-fg:#fca5a5;
+  --rx:#60a5fa; --tx:#34d399; --rx-soft:rgba(96,165,250,.85); --tx-soft:rgba(52,211,153,.85);
+  --rx-fill:rgba(96,165,250,.15); --tx-fill:rgba(52,211,153,.12);
+  --grid:#1e2a42; --glow:rgba(59,130,246,.18); --header-glow:transparent;
+  --radius:12px; --radius-sm:8px;
+}

@@ -1,0 +1,12 @@
+/* theme token: 霓虹赛博（cyber） */
+html[data-theme="cyber"]{
+  --bg:#070b14; --bg2:#0a1020; --panel:#0d1528; --panel2:#08101c;
+  --line:#1c2d4d; --line2:#15233d; --border:#2a4570;
+  --text:#eaf6ff; --muted:#7fb0d8; --label:#9ec9ef;
+  --hover:#12203a; --accent:#22d3ee; --accent2:#06b6d4;
+  --ok:#10b981; --ok2:#059669; --warn:#f59e0b; --danger:#f43f5e; --danger2:#e11d48;
+  --badge-bg:#0e3a4a; --badge-fg:#67e8f9; --badge-off-bg:#4a1028; --badge-off-fg:#fda4af;
+  --rx:#22d3ee; --tx:#e879f9; --rx-soft:rgba(34,211,238,.88); --tx-soft:rgba(232,121,249,.88);
+  --rx-fill:rgba(34,211,238,.14); --tx-fill:rgba(232,121,249,.12);
+  --grid:#16304f; --glow:rgba(34,211,238,.22); --header-glow:linear-gradient(90deg,rgba(34,211,238,.08),rgba(232,121,249,.08));
+}

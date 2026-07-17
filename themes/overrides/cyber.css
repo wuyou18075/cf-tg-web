@@ -1,0 +1,5 @@
+/* overrides for theme: cyber */
+
+html[data-theme="cyber"] .status-pill.on{color:#6ee7b7;background:rgba(16,185,129,.14);border-color:rgba(16,185,129,.35)}
+
+html[data-theme="cyber"] .status-pill.off{color:#fda4af;background:rgba(244,63,94,.12);border-color:rgba(244,63,94,.3)}
