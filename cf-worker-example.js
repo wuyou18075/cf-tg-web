@@ -6921,7 +6921,7 @@ function renderUsageSelf(data, fromCache) {
   if (tipsEl) {
     const tips = data.tips || [];
     let s = tips.length ? ("提示：" + tips.join("；")) : "提示：本机自计数为下限（漏 isolate、不含 cron），精确总量请看上方 CF 官方统计。";
-    if (fromCache) s += "（本地缓存，点"刷新用量"取新）";
+    if (fromCache) s += '（本地缓存，点"刷新用量"按钮取新）';
     tipsEl.textContent = s;
   }
   drawUsageBars("usageHourChart", "self", data.by_hour || [], "今日每小时请求（近似）");
@@ -6987,7 +6987,7 @@ function renderUsageCf(cf, fromCache) {
   let note = "含 fetch 与 scheduled（cron）调用；约 10 分钟更新一次。";
   if (cf.sampled) note += " 行数触顶 1 万，可能为采样下限。";
   if (cf.cached) note += " 本次为服务端缓存。";
-  if (fromCache) note += "（本地缓存，点"刷新用量"取新）";
+  if (fromCache) note += '（本地缓存，点"刷新用量"按钮取新）';
   if (status) status.textContent = note;
   if (tipsEl) {
     tipsEl.textContent = (todayTotal > 0 && peakC >= Math.max(50, todayTotal * 0.25))
