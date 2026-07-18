@@ -719,7 +719,8 @@ async function getHistoryHourly(env, { mid, day }) {
     }
   }
 
-  // 仅当选的是「今天」时，用 machines 实时值覆盖当前小时及之后（未来小时=当前累计）
+  // 选「今天」时：当前小时用 machines 实时累计覆盖；当前小时之后尚未到达 → 断线（null），不再前向延续
+  const futureHours = new Set();
   if (dayStr === today) {
     try {
       let liveSql = `SELECT machine_id, today_rx, today_tx FROM machines`;
@@ -732,29 +733,26 @@ async function getHistoryHourly(env, { mid, day }) {
         ? await env.DB.prepare(liveSql).bind(...liveBinds).all()
         : await env.DB.prepare(liveSql).all();
       const curHour = shanghaiHourBucket(now);
-      const hourLab = labels.includes(curHour) ? curHour : null;
+      const idx = labels.indexOf(curHour);
       let rx = 0, tx = 0;
       for (const r of live.results || []) {
         rx += Number(r.today_rx) || 0;
         tx += Number(r.today_tx) || 0;
       }
-      if (hourLab) {
-        const prev = totalByHour.get(hourLab) || { rx: 0, tx: 0 };
-        totalByHour.set(hourLab, { rx: Math.max(prev.rx, rx), tx: Math.max(prev.tx, tx) });
-        const idx = labels.indexOf(hourLab);
-        // 今天尚未到达的小时：显示截至当前的累计（同日过程中尚未增长）
-        for (let i = idx; i < labels.length; i++) {
-          const prevH = totalByHour.get(labels[i]) || { rx: 0, tx: 0 };
-          totalByHour.set(labels[i], {
-            rx: Math.max(prevH.rx, rx),
-            tx: Math.max(prevH.tx, tx),
-          });
+      if (idx >= 0) {
+        // 当前小时：显示最新累计（正在进行中）
+        const prev = totalByHour.get(labels[idx]) || { rx: 0, tx: 0 };
+        totalByHour.set(labels[idx], { rx: Math.max(prev.rx, rx), tx: Math.max(prev.tx, tx) });
+        // 当前小时之后未到达的小时标记断线，避免凌晨出现"全天数据"假象
+        for (let i = idx + 1; i < labels.length; i++) {
+          futureHours.add(labels[i]);
         }
       }
     } catch { /* ignore */ }
   }
 
   const points = labels.map((bucket) => {
+    if (futureHours.has(bucket)) return { bucket, rx: null, tx: null, total: null };
     const v = totalByHour.get(bucket) || { rx: 0, tx: 0 };
     return { bucket, rx: v.rx, tx: v.tx, total: v.rx + v.tx };
   });
@@ -5853,7 +5851,9 @@ const valueLabelPlugin = {
         for (let i = 0; i < n; i++) {
           const el = meta.data[i];
           if (!el) continue;
-          const v = Number(ds.data[i]) || 0;
+          const raw = ds.data[i];
+          if (raw == null) continue;
+          const v = Number(raw) || 0;
           const t = fmtChartLabel(v);
           if (!t) continue;
           const y = el.y - lift;
@@ -5883,8 +5883,8 @@ function buildLineChart(canvas, chartData, opts) {
     return m[4];
   });
   const fullLabels = points.map(p => p.bucket);
-  const rx = points.map(p => (Number(p.rx) || 0) / 1e9);
-  const tx = points.map(p => (Number(p.tx) || 0) / 1e9);
+  const rx = points.map(p => (p.rx == null ? null : (Number(p.rx) || 0) / 1e9));
+  const tx = points.map(p => (p.tx == null ? null : (Number(p.tx) || 0) / 1e9));
   const datasets = [];
   const tc = themeChartColors();
   if (showRx) {
