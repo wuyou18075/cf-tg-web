@@ -1761,10 +1761,16 @@ const UI_PREF_DEFAULTS = {
   logs_page_size: "20",
 };
 
-// ─── API 用量统计（内存聚合，阈值/定时刷盘，省免费额度） ───
+// ─── API 用量统计（内存聚合，阈值/定时/打开用量页刷盘，省免费额度） ───
+// 注意：CF Worker 多 isolate 各自有内存，未刷到 D1 的计数会随 isolate 回收丢失。
+// 策略：读用量时 force 刷当前 isolate；≥50 或距上次刷盘 ≥5min 也刷；cron 每小时 force。
 const _usageBuf = new Map();
 let _usageBufN = 0;
 let _usageFlushing = false;
+let _usageBufSince = 0; // 本 isolate 缓冲首条入队时间
+let _usageLastFlushAt = 0;
+const USAGE_FLUSH_N = 50;
+const USAGE_FLUSH_AGE_MS = 5 * 60 * 1000;
 
 function shanghaiNowParts(tsSec) {
   const t = Number(tsSec) || Math.floor(Date.now() / 1000);
@@ -1800,20 +1806,30 @@ function trackApiUsage(req, url) {
     const method = String((req && req.method) || "GET").toUpperCase().slice(0, 8);
     const path = normalizeUsagePath(url && url.pathname);
     const key = day + "|" + hour + "|" + method + "|" + path;
+    if (!_usageBufN) _usageBufSince = Date.now();
     _usageBuf.set(key, (_usageBuf.get(key) || 0) + 1);
     _usageBufN += 1;
   } catch { /* ignore */ }
 }
 
+/** 是否该刷盘：force，或条数达阈值，或缓冲已挂超过 5 分钟 */
+function shouldFlushUsage(force) {
+  if (!_usageBufN) return false;
+  if (force) return true;
+  if (_usageBufN >= USAGE_FLUSH_N) return true;
+  if (_usageBufSince && (Date.now() - _usageBufSince) >= USAGE_FLUSH_AGE_MS) return true;
+  return false;
+}
+
 async function flushApiUsage(env, force) {
   if (!env || !env.DB) return;
-  if (_usageFlushing || !_usageBufN) return;
-  if (!force && _usageBufN < 200) return;
+  if (_usageFlushing || !shouldFlushUsage(force)) return;
   _usageFlushing = true;
   try {
     const entries = [..._usageBuf.entries()];
     _usageBuf.clear();
     _usageBufN = 0;
+    _usageBufSince = 0;
     for (let i = 0; i < entries.length; i += 40) {
       const chunk = entries.slice(i, i + 40);
       const stmts = chunk.map(([key, n]) => {
@@ -1827,11 +1843,51 @@ async function flushApiUsage(env, force) {
       });
       await env.DB.batch(stmts);
     }
+    _usageLastFlushAt = Date.now();
   } catch (e) {
     console.log("[usage] flush", e && e.message);
   } finally {
     _usageFlushing = false;
   }
+}
+
+/** 只读快照当前 isolate 未刷盘缓冲，用于汇总展示（不 clear） */
+function snapshotUsageBuf() {
+  const out = [];
+  for (const [key, n] of _usageBuf.entries()) {
+    const [day, hour, method, path] = key.split("|");
+    out.push({
+      day,
+      hour: Number(hour) || 0,
+      method,
+      path,
+      count: Number(n) || 0,
+    });
+  }
+  return out;
+}
+
+function mergeUsagePending(totals, by_path, by_hour, today, pending) {
+  const pathMap = new Map();
+  for (const r of by_path) pathMap.set(r.method + "\0" + r.path, r);
+  for (const p of pending) {
+    if (!p.day) continue;
+    if (Object.prototype.hasOwnProperty.call(totals, p.day)) {
+      totals[p.day] += p.count;
+    }
+    if (p.day !== today) continue;
+    const k = (p.method || "") + "\0" + (p.path || "");
+    const row = pathMap.get(k);
+    if (row) row.count += p.count;
+    else {
+      const nr = { path: p.path, method: p.method, count: p.count };
+      pathMap.set(k, nr);
+      by_path.push(nr);
+    }
+    if (p.hour >= 0 && p.hour < 24) by_hour[p.hour].count += p.count;
+  }
+  by_path.sort((a, b) => b.count - a.count);
+  if (by_path.length > 40) by_path.length = 40;
 }
 
 async function getApiUsageSummary(env, { days } = {}) {
@@ -1840,10 +1896,21 @@ async function getApiUsageSummary(env, { days } = {}) {
   const daysList = [];
   for (let i = 0; i < nDays; i++) daysList.push(shanghaiBucket(now - i * 86400, false));
   const today = daysList[0];
+  const pending = snapshotUsageBuf();
   if (!env.DB) {
-    return { ok: true, today, days: daysList, totals: {}, today_total: 0, by_path: [], by_hour: [], tips: [] };
+    const totals = {};
+    for (const d of daysList) totals[d] = 0;
+    const by_path = [];
+    const by_hour = Array.from({ length: 24 }, (_, h) => ({ hour: h, count: 0 }));
+    mergeUsagePending(totals, by_path, by_hour, today, pending);
+    return {
+      ok: true, today, days: daysList, totals, today_total: totals[today] || 0,
+      by_path, by_hour, peak_hour: 0, peak_count: 0, tips: [],
+      pending_in_memory: pending.reduce((a, x) => a + x.count, 0),
+    };
   }
-  try { await flushApiUsage(env, false); } catch {}
+  // 打开用量页：force 刷当前 isolate，避免长期压在内存里被回收后永远 0
+  try { await flushApiUsage(env, true); } catch {}
 
   const ph = daysList.map(() => "?").join(",");
   const dayRows = await env.DB.prepare(
@@ -1871,6 +1938,10 @@ async function getApiUsageSummary(env, { days } = {}) {
     if (h >= 0 && h < 24) by_hour[h].count = Number(r.c) || 0;
   }
 
+  // flush 后缓冲通常已空；若并发新请求又入队，把剩余 pending 叠进展示
+  const pendingAfter = snapshotUsageBuf();
+  mergeUsagePending(totals, by_path, by_hour, today, pendingAfter);
+
   const today_total = totals[today] || 0;
   let peak_hour = 0, peak_count = 0;
   for (const x of by_hour) {
@@ -1891,9 +1962,14 @@ async function getApiUsageSummary(env, { days } = {}) {
   if (today_total > 0 && share("/api/machines") / today_total > 0.3) {
     tips.push("/api/machines 偏高：获取流量轮询或频繁刷新会放大请求");
   }
+  if (today_total === 0) {
+    tips.push("若长期为 0：多 isolate 未刷盘会丢计数，点刷新或等 VPS 上报后再看；权威总量看上方 CF");
+  }
   return {
     ok: true, today, days: daysList, totals, today_total,
     by_path, by_hour, peak_hour, peak_count, tips,
+    pending_in_memory: pendingAfter.reduce((a, x) => a + x.count, 0),
+    last_flush_at: _usageLastFlushAt || null,
   };
 }
 
@@ -4102,7 +4178,7 @@ textarea:focus{border-color:var(--accent)}
         </div>
       </div>
       <p class="muted" style="margin:0 0 12px;line-height:1.55">
-        双源对照：上方 <b>CF 官方统计</b>（权威，含定时任务 cron，约 10 分钟刷新一次）；下方 <b>本机自计数</b>（路径分布，近似下限，≤1 小时延迟）。时区 Asia/Shanghai。
+        双源对照：上方 <b>CF 官方统计</b>（权威，含定时任务 cron，约 10 分钟刷新一次）；下方 <b>本机自计数</b>（路径分布，近似下限；打开本页会刷盘，仍可能漏其它 isolate）。时区 Asia/Shanghai。
       </p>
 
       <!-- CF 官方 Analytics -->
@@ -4123,7 +4199,7 @@ textarea:focus{border-color:var(--accent)}
 
       <!-- 本机自计数（近似） -->
       <div class="panel" style="margin:0;padding:12px">
-        <h2 style="margin-bottom:4px">本机自计数 <span class="muted" style="font-size:12px;font-weight:normal">（近似 · 下限 · ≤1h 延迟）</span></h2>
+        <h2 style="margin-bottom:4px">本机自计数 <span class="muted" style="font-size:12px;font-weight:normal">（近似 · 路径 · 打开本页刷盘）</span></h2>
         <div class="muted" style="margin-bottom:8px;font-size:12px">来源：Worker 内存聚合后批量写 D1。可看路径分布，但 isolate 回收会漏计、cron 不计入，故为下限。</div>
         <div class="cards" id="usageSummaryCards"><div class="card"><div class="label">加载中</div><div class="val">…</div></div></div>
         <div class="chart-wrap" style="height:200px;margin-top:10px"><canvas id="usageHourChart"></canvas></div>
@@ -6920,8 +6996,10 @@ function renderUsageSelf(data, fromCache) {
   }
   if (tipsEl) {
     const tips = data.tips || [];
-    let s = tips.length ? ("提示：" + tips.join("；")) : "提示：本机自计数为下限（漏 isolate、不含 cron），精确总量请看上方 CF 官方统计。";
+    let s = tips.length ? ("提示：" + tips.join("；")) : "提示：本机自计数为路径分布下限（漏其它 isolate、不含 cron）；精确总量请看上方 CF 官方统计。";
     if (fromCache) s += '（本地缓存，点"刷新用量"按钮取新）';
+    const pend = Number(data.pending_in_memory) || 0;
+    if (pend > 0) s += "（本 isolate 尚有 " + pend + " 次未刷盘已计入上方数字）";
     tipsEl.textContent = s;
   }
   drawUsageBars("usageHourChart", "self", data.by_hour || [], "今日每小时请求（近似）");
